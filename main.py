@@ -29,6 +29,8 @@ matplotlib.use("Agg")
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
+from funds_manager import add_fund_and_save, normalize_fund_code, preview_fund_candidate
+
 
 BG = "#F0F2F5"  # Window background
 SURFACE = "#FFFFFF"  # Card surface
@@ -1270,9 +1272,15 @@ class FletApp:
             icon_color=ACCENT,
             tooltip="刷新基金列表",
         )
+        self.btn_fund_list_add = ft.IconButton(
+            ft.Icons.ADD,
+            on_click=self.on_add_fund_click,
+            icon_color=ACCENT,
+            tooltip="添加基金",
+        )
 
         self._fund_list_pct_width = 110
-        self._fund_list_action_width = 70
+        self._fund_list_action_width = 110
         fund_list_header_row = ft.Row(
             [
                 ft.Container(
@@ -1283,7 +1291,11 @@ class FletApp:
                 self._fund_list_right_cell(self.txt_fund_list_col_est),
                 self._fund_list_right_cell(self.txt_fund_list_col_prev_nav),
                 self._fund_list_action_cell(
-                    ft.Row([self.prg_fund_list_loading, self.btn_fund_list_refresh], spacing=6, alignment=ft.MainAxisAlignment.CENTER)
+                    ft.Row(
+                        [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    )
                 ),
             ],
             spacing=12,
@@ -1574,6 +1586,160 @@ class FletApp:
         self.dd_target.value = str(code)
         # Trigger refresh flow
         self.on_target_change(None)
+
+    def _show_message(self, message: str):
+        self.page.snack_bar = ft.SnackBar(content=ft.Text(message))
+        self.page.snack_bar.open = True
+        self.page.update()
+
+    def _close_dialog(self):
+        dialog = getattr(self.page, "dialog", None)
+        LOGGER.info("关闭弹窗: 尝试 page.dialog / overlay / page.close")
+        if dialog:
+            try:
+                dialog.open = False
+                self.page.dialog = None
+            except Exception:
+                pass
+        try:
+            overlays = list(getattr(self.page, "overlay", []) or [])
+            for ctrl in overlays:
+                if isinstance(ctrl, ft.AlertDialog):
+                    ctrl.open = False
+        except Exception:
+            pass
+        try:
+            if dialog:
+                self.page.close(dialog)
+        except Exception:
+            pass
+        self.page.update()
+
+    def _open_dialog(self, dialog: ft.AlertDialog):
+        LOGGER.info("打开弹窗: 尝试 overlay 路径")
+        err = None
+        try:
+            overlay = getattr(self.page, "overlay", None)
+            if overlay is not None:
+                if dialog not in overlay:
+                    overlay.append(dialog)
+                dialog.open = True
+                self.page.update()
+                return
+        except Exception as exc:
+            err = exc
+
+        LOGGER.info("打开弹窗: 尝试 page.dialog 路径")
+        try:
+            self.page.dialog = dialog
+            dialog.open = True
+            self.page.update()
+            return
+        except Exception as exc:
+            err = exc
+            LOGGER.info("打开弹窗: page.dialog 失败，回退 page.open")
+        try:
+            self.page.open(dialog)
+        except Exception as exc:
+            LOGGER.exception("打开弹窗失败")
+            self._show_message(f"弹窗打开失败：{exc or err}")
+
+    def on_add_fund_click(self, e=None):
+        # Visible feedback to confirm click event is firing.
+        self._show_message("正在打开添加窗口...")
+        self.open_add_fund_input_dialog(e)
+
+    def open_add_fund_input_dialog(self, e=None):
+        LOGGER.info("点击添加基金按钮")
+        self._add_fund_input_field = ft.TextField(
+            label="基金代码",
+            hint_text="例如 110022",
+            autofocus=True,
+            on_submit=self.on_add_fund_input_submit,
+            width=260,
+        )
+        self._add_fund_query_btn = ft.Button("查询", on_click=self.on_add_fund_input_submit)
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("添加基金"),
+            content=self._add_fund_input_field,
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                self._add_fund_query_btn,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_add_fund_input_submit(self, e=None):
+        field = getattr(self, "_add_fund_input_field", None)
+        code = normalize_fund_code(field.value if field else "")
+        if not code:
+            self._show_message("请输入基金代码")
+            return
+
+        try:
+            preview = preview_fund_candidate(code, fetch_fund_estimate)
+        except ValueError as exc:
+            self._show_message(f"查询失败：{exc}")
+            return
+
+        self._close_dialog()
+        self._open_add_fund_preview_dialog(preview)
+
+    def _open_add_fund_preview_dialog(self, preview: dict):
+        pct = preview.get("pct")
+        pct_text = "--"
+        if pct is not None:
+            try:
+                v = float(pct)
+                pct_text = f"{'+' if v > 0 else ''}{v:.2f}%"
+            except (TypeError, ValueError):
+                pct_text = "--"
+
+        self._pending_add_preview = preview
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("基金预览"),
+            content=ft.Column(
+                [
+                    ft.Text(f"{preview.get('name', '')} ({preview.get('code', '')})", weight=ft.FontWeight.W_600),
+                    ft.Text(f"实时估值涨跌幅：{pct_text}", color=SUBTEXT),
+                ],
+                tight=True,
+                spacing=8,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                ft.Button("添加到列表", on_click=self.on_add_fund_confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_add_fund_confirm(self, e=None):
+        preview = getattr(self, "_pending_add_preview", None) or {}
+        code = normalize_fund_code(preview.get("code"))
+        if not code:
+            self._show_message("基金代码无效")
+            return
+
+        try:
+            funds_path = _app_dir() / "funds.json"
+            self.funds = add_fund_and_save(self.funds, code, funds_path)
+        except (ValueError, OSError) as exc:
+            self._show_message(f"添加失败：{exc}")
+            return
+
+        self.targets = self._build_targets()
+        self.dd_target.options = [ft.dropdown.Option(key=t["code"], text=t["label"]) for t in self.targets]
+        if self.targets:
+            self.dd_target.value = self.targets[0]["code"]
+
+        self._close_dialog()
+        self._hydrate_fund_names_async()
+        self.refresh_fund_list()
+        self._show_message("已添加到列表")
 
     def refresh_current_view(self, e):
         if self.active_tab == "fund_list":
