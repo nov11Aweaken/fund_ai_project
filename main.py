@@ -29,7 +29,7 @@ matplotlib.use("Agg")
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-from funds_manager import add_fund_and_save, normalize_fund_code, preview_fund_candidate
+from funds_manager import add_fund_and_save, normalize_fund_code, preview_fund_candidate, remove_fund_and_save
 
 
 BG = "#F0F2F5"  # Window background
@@ -1051,10 +1051,12 @@ class FletApp:
         self._pending_market_refresh = False
         self._market_page_index = 1
 
+        default_target = self.targets[0] if self.targets else {"code": None, "label": "暂无基金"}
+
         # UI Components
         self.dd_target = ft.Dropdown(
             options=[ft.dropdown.Option(key=t["code"], text=t["label"]) for t in self.targets],
-            value=self.targets[0]["code"],
+            value=default_target["code"],
             on_select=self.on_target_change,
             width=440
         )
@@ -1077,7 +1079,7 @@ class FletApp:
 
         # === Data card UI ===
         self.txt_header_title = ft.Text(
-            self.targets[0]["label"],
+            default_target["label"],
             size=14,
             weight=ft.FontWeight.W_600,
             color=TEXT,
@@ -1280,7 +1282,7 @@ class FletApp:
         )
 
         self._fund_list_pct_width = 110
-        self._fund_list_action_width = 110
+        self._fund_list_action_width = 170
         fund_list_header_row = ft.Row(
             [
                 ft.Container(
@@ -1559,6 +1561,10 @@ class FletApp:
         self.page.update()
 
     def on_tab_fund(self, e):
+        if not self.targets:
+            self._show_message("暂无基金，请先添加")
+            self._set_tab_selected("fund_list")
+            return
         self._set_tab_selected("fund")
         self.manual_refresh()
 
@@ -1735,11 +1741,65 @@ class FletApp:
         self.dd_target.options = [ft.dropdown.Option(key=t["code"], text=t["label"]) for t in self.targets]
         if self.targets:
             self.dd_target.value = self.targets[0]["code"]
+        else:
+            self.dd_target.value = None
 
         self._close_dialog()
         self._hydrate_fund_names_async()
         self.refresh_fund_list()
         self._show_message("已添加到列表")
+
+    def open_delete_fund_confirm_dialog(self, code: str, name: str):
+        normalized = normalize_fund_code(code)
+        if not normalized:
+            self._show_message("基金代码无效")
+            return
+
+        self._pending_delete_fund = {"code": normalized, "name": (name or "").strip()}
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("删除基金"),
+            content=ft.Text(f"确认删除 {(name or normalized)} ({normalized}) 吗？"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                ft.Button("确认", on_click=self.on_delete_fund_confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_delete_fund_confirm(self, e=None):
+        pending = getattr(self, "_pending_delete_fund", None) or {}
+        code = normalize_fund_code(pending.get("code"))
+        if not code:
+            self._show_message("基金代码无效")
+            return
+
+        try:
+            funds_path = _app_dir() / "funds.json"
+            self.funds = remove_fund_and_save(self.funds, code, funds_path)
+        except (ValueError, OSError) as exc:
+            self._show_message(f"删除失败：{exc}")
+            return
+
+        deleting_current = str(self.dd_target.value or "").strip() == code
+        self.targets = self._build_targets()
+        self.dd_target.options = [ft.dropdown.Option(key=t["code"], text=t["label"]) for t in self.targets]
+        if self.targets:
+            self.dd_target.value = self.targets[0]["code"]
+        else:
+            self.dd_target.value = None
+
+        cached_items = self._fund_list_cache.get("items") or []
+        local_items = [it for it in cached_items if str(it.get("code") or "").strip() != code]
+        fetch_time = datetime.now().strftime("%H:%M:%S")
+        self._fund_list_cache["items"] = local_items
+        self._fund_list_cache["last_fetch_time"] = fetch_time
+
+        self._close_dialog()
+        self._set_tab_selected("fund_list" if deleting_current else self.active_tab)
+        self._safe_run_task(self._update_fund_list_ui, local_items, fetch_time)
+        self._show_message("已删除基金")
 
     def refresh_current_view(self, e):
         if self.active_tab == "fund_list":
@@ -2037,13 +2097,27 @@ class FletApp:
                     self._fund_list_right_cell(self._pct_text(it.get("est_pct"))),
                     self._fund_list_right_cell(self._pct_text(it.get("prev_day_pct"))),
                     self._fund_list_action_cell(
-                        ft.TextButton(
-                            "详情",
-                            on_click=(lambda e, c=code: self.open_fund_detail(c)),
-                            style=ft.ButtonStyle(
-                                color={ft.ControlState.DEFAULT: ACCENT},
-                                overlay_color={ft.ControlState.HOVERED: "#1A2196F3"},
-                            ),
+                        ft.Row(
+                            [
+                                ft.TextButton(
+                                    "详情",
+                                    on_click=(lambda e, c=code: self.open_fund_detail(c)),
+                                    style=ft.ButtonStyle(
+                                        color={ft.ControlState.DEFAULT: ACCENT},
+                                        overlay_color={ft.ControlState.HOVERED: "#1A2196F3"},
+                                    ),
+                                ),
+                                ft.TextButton(
+                                    "删除",
+                                    on_click=(lambda e, c=code, n=name: self.open_delete_fund_confirm_dialog(c, n)),
+                                    style=ft.ButtonStyle(
+                                        color={ft.ControlState.DEFAULT: DOWN},
+                                        overlay_color={ft.ControlState.HOVERED: "#1A4CAF50"},
+                                    ),
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            spacing=4,
                         )
                         if code
                         else ft.Text("", color=SUBTEXT)
@@ -2268,11 +2342,13 @@ class FletApp:
         return targets
 
     def current_target_data(self):
+        if not self.targets:
+            return {}
         code = str(self.dd_target.value or "").strip()
         for t in self.targets:
             if str(t.get("code")) == code:
                 return t
-        return self.targets[0]
+        return self.targets[0] if self.targets else {}
 
     def _hydrate_fund_names_async(self):
         # Fetch fund names by code and update dropdown/targets without requiring names in funds.json
@@ -2328,6 +2404,8 @@ class FletApp:
 
     def on_target_change(self, e):
         tgt = self.current_target_data()
+        if not tgt:
+            return
         cache_key = self._cache_key(tgt)
         self.current_chart_code = None  # Reset chart
 
@@ -2341,6 +2419,9 @@ class FletApp:
 
     def open_dynamic_kline(self, e):
         tgt = self.current_target_data()
+        if not tgt:
+            self._show_message("暂无基金")
+            return
         path = write_dynamic_chart_html(tgt)
         webbrowser.open(path.resolve().as_uri())
 
@@ -2348,6 +2429,8 @@ class FletApp:
         # We can run fetch in thread to avoid blocking UI
         import threading
         tgt = self.current_target_data()
+        if not tgt or not str(tgt.get("code") or "").strip():
+            return
         cache_key = self._cache_key(tgt)
 
         if self._refreshing:

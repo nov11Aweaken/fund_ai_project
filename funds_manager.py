@@ -53,3 +53,20 @@ def add_fund_and_save(existing_funds: list[dict], code: str, config_path: Path) 
     with config_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     return updated
+
+
+def remove_fund_and_save(existing_funds: list[dict], code: str, config_path: Path) -> list[dict]:
+    normalized_code = normalize_fund_code(code)
+    if not normalized_code:
+        raise ValueError("基金代码不能为空")
+
+    current = _normalize_fund_items(existing_funds)
+    updated = [item for item in current if str(item.get("code") or "").strip() != normalized_code]
+    if len(updated) == len(current):
+        raise ValueError("基金不在列表中")
+
+    payload = {"funds": [{"code": str(item["code"])} for item in updated]}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return updated
