@@ -1034,8 +1034,8 @@ class FletApp:
         self.page.on_close = self.on_close
 
         self.funds = load_fund_config()
-        self.targets = self._build_targets()
         self._fund_name_cache: dict[str, str] = {}
+        self.targets = self._build_targets()
 
         self.active_tab = "market"  # "market" | "fund_list" | "fund"
 
@@ -1959,10 +1959,11 @@ class FletApp:
                 if not code:
                     continue
                 cfg_name = (f.get("name") or "").strip()
+                cached_name = self._fund_name_cache.get(code, "").strip()
 
                 row = {
                     "code": code,
-                    "name": cfg_name,
+                    "name": cfg_name or cached_name,
                     "est_pct": None,
                     "prev_day_pct": None,
                     "error": None,
@@ -1970,7 +1971,7 @@ class FletApp:
 
                 try:
                     est = fetch_fund_estimate(code)
-                    row["name"] = cfg_name or est.get("name") or code
+                    row["name"] = cfg_name or (est.get("name") or "").strip() or cached_name or code
                     row["est_pct"] = est.get("pct")
                 except Exception as exc:
                     LOGGER.exception("Fund estimate failed: %s", code)
@@ -2261,7 +2262,8 @@ class FletApp:
             if not code:
                 continue
 
-            label_name = (item.get("name") or "").strip() or code
+            cfg_name = (item.get("name") or "").strip()
+            label_name = cfg_name or self._fund_name_cache.get(code, "").strip() or code
             targets.append({"key": f"fund:{code}", "label": f"{label_name} ({code})", "type": "fund", "code": code})
         return targets
 
@@ -2278,7 +2280,11 @@ class FletApp:
             mapping: dict[str, str] = {}
             for t in self.targets:
                 code = str(t.get("code") or "").strip()
-                if not code or code in self._fund_name_cache:
+                if not code:
+                    continue
+                cached_name = self._fund_name_cache.get(code, "").strip()
+                if cached_name:
+                    mapping[code] = cached_name
                     continue
                 try:
                     est = fetch_fund_estimate(code)
