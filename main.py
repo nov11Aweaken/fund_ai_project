@@ -1044,6 +1044,8 @@ class FletApp:
         self._fund_list_cache: dict[str, dict] = {}
         self._fund_list_refreshing = False
         self._pending_fund_list_refresh = False
+        self._fund_list_sort_field: str | None = None
+        self._fund_list_sort_desc = False
 
         # === Market indices view state ===1
         self._market_cache: dict[str, dict] = {}
@@ -1266,6 +1268,38 @@ class FletApp:
             weight=ft.FontWeight.W_600,
             text_align=ft.TextAlign.CENTER,
         )
+        def make_sort_btn(icon, on_click, tooltip):
+            return ft.IconButton(
+                icon,
+                on_click=on_click,
+                icon_color=SUBTEXT,
+                icon_size=12,
+                width=16,
+                height=16,
+                style=ft.ButtonStyle(padding=0),
+                tooltip=tooltip,
+            )
+
+        self.btn_fund_list_sort_est_asc = make_sort_btn(
+            ft.Icons.ARROW_DROP_UP,
+            lambda e: self.on_fund_list_sort("est_pct", False),
+            "实时估值升序",
+        )
+        self.btn_fund_list_sort_est_desc = make_sort_btn(
+            ft.Icons.ARROW_DROP_DOWN,
+            lambda e: self.on_fund_list_sort("est_pct", True),
+            "实时估值降序",
+        )
+        self.btn_fund_list_sort_prev_asc = make_sort_btn(
+            ft.Icons.ARROW_DROP_UP,
+            lambda e: self.on_fund_list_sort("prev_day_pct", False),
+            "净值变化升序",
+        )
+        self.btn_fund_list_sort_prev_desc = make_sort_btn(
+            ft.Icons.ARROW_DROP_DOWN,
+            lambda e: self.on_fund_list_sort("prev_day_pct", True),
+            "净值变化降序",
+        )
         self.txt_fund_list_page_info = ft.Text("第 1/1 页 · 共 0 条", color=SUBTEXT, size=12)
         self.prg_fund_list_loading = ft.ProgressRing(visible=False, width=14, height=14, stroke_width=2, color=ACCENT)
         self.btn_fund_list_refresh = ft.IconButton(
@@ -1281,8 +1315,36 @@ class FletApp:
             tooltip="添加基金",
         )
 
-        self._fund_list_pct_width = 110
+        self._fund_list_pct_width = 122
         self._fund_list_action_width = 170
+        est_header_cell = ft.Row(
+            [
+                self.txt_fund_list_col_est,
+                ft.Column(
+                    [self.btn_fund_list_sort_est_asc, self.btn_fund_list_sort_est_desc],
+                    spacing=-6,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    tight=True,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=2,
+        )
+        prev_nav_header_cell = ft.Row(
+            [
+                self.txt_fund_list_col_prev_nav,
+                ft.Column(
+                    [self.btn_fund_list_sort_prev_asc, self.btn_fund_list_sort_prev_desc],
+                    spacing=-6,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    tight=True,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=2,
+        )
         fund_list_header_row = ft.Row(
             [
                 ft.Container(
@@ -1290,8 +1352,8 @@ class FletApp:
                     expand=True,
                     alignment=ft.Alignment(-1, 0),
                 ),
-                self._fund_list_right_cell(self.txt_fund_list_col_est),
-                self._fund_list_right_cell(self.txt_fund_list_col_prev_nav),
+                self._fund_list_right_cell(est_header_cell),
+                self._fund_list_right_cell(prev_nav_header_cell),
                 self._fund_list_action_cell(
                     ft.Row(
                         [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add],
@@ -1571,6 +1633,41 @@ class FletApp:
     def on_tab_fund_list(self, e):
         self._set_tab_selected("fund_list")
         self.refresh_fund_list(e)
+
+    def on_fund_list_sort(self, field: str, desc: bool):
+        self._fund_list_sort_field = field
+        self._fund_list_sort_desc = bool(desc)
+        items = self._fund_list_cache.get("items") or []
+        fetch_time = self._fund_list_cache.get("last_fetch_time") or datetime.now().strftime("%H:%M:%S")
+        self._safe_run_task(self._update_fund_list_ui, items, fetch_time)
+
+    def _update_fund_list_sort_icons(self):
+        sort_field = getattr(self, "_fund_list_sort_field", None)
+        sort_desc = bool(getattr(self, "_fund_list_sort_desc", False))
+        self.btn_fund_list_sort_est_asc.icon_color = ACCENT if sort_field == "est_pct" and not sort_desc else SUBTEXT
+        self.btn_fund_list_sort_est_desc.icon_color = ACCENT if sort_field == "est_pct" and sort_desc else SUBTEXT
+        self.btn_fund_list_sort_prev_asc.icon_color = ACCENT if sort_field == "prev_day_pct" and not sort_desc else SUBTEXT
+        self.btn_fund_list_sort_prev_desc.icon_color = ACCENT if sort_field == "prev_day_pct" and sort_desc else SUBTEXT
+
+    def _sort_fund_list_items(self, items: list[dict]) -> list[dict]:
+        sort_field = getattr(self, "_fund_list_sort_field", None)
+        if sort_field not in {"est_pct", "prev_day_pct"}:
+            return list(items or [])
+
+        valid_items: list[tuple[float, dict]] = []
+        missing_items: list[dict] = []
+        for it in items or []:
+            raw = it.get(sort_field)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                missing_items.append(it)
+                continue
+            valid_items.append((value, it))
+
+        valid_items.sort(key=lambda x: x[0], reverse=bool(getattr(self, "_fund_list_sort_desc", False)))
+        sorted_valid = [it for _, it in valid_items]
+        return sorted_valid + missing_items
 
     def on_tab_market(self, e):
         self._set_tab_selected("market")
@@ -2071,10 +2168,12 @@ class FletApp:
 
         self.txt_fund_list_col_est.value = "实时估值"
         self.txt_fund_list_col_prev_nav.value = self._fund_prev_trade_day_nav_header()
+        self._update_fund_list_sort_icons()
+        render_items = self._sort_fund_list_items(items)
         self.txt_fund_list_page_info.value = f"第 1/1 页 · 共 {len(items or [])} 条 · 更新于 {fetch_time}"
 
         cards: list[ft.Control] = []
-        for it in items:
+        for it in render_items:
             name = (it.get("name") or "").strip() or it.get("code")
             code = it.get("code")
             title = f"{name} ({code})" if code else name
