@@ -373,16 +373,6 @@ def fetch_cn_indices(names: list[str] | None = None):
         errors.append(f"EM异常: {exc}")
 
     if not collected:
-        try:
-            fallback_rows = fetch_cn_indices_sina(target_names)
-            for row in fallback_rows:
-                name = str(row.get("name") or "")
-                if name and name not in collected:
-                    collected[name] = row
-        except Exception as exc:
-            errors.append(f"Sina异常: {exc}")
-
-    if not collected:
         detail_parts = errors[:]
         if cat_errors:
             detail_parts.append("分类失败=" + " ; ".join(cat_errors[:3]))
@@ -1831,6 +1821,8 @@ class FletApp:
             funds_path = _app_dir() / "funds.json"
             self.funds = add_fund_and_save(self.funds, code, funds_path)
         except (ValueError, OSError) as exc:
+            # Close preview dialog first so failure feedback is clearly visible.
+            self._close_dialog()
             self._show_message(f"添加失败：{exc}")
             return
 
@@ -1930,15 +1922,19 @@ class FletApp:
 
         self._market_refreshing = True
         names = list(MARKET_INDEX_NAMES)
+        cached_items = self._market_cache.get("items") or []
         placeholders = [{"name": n, "price": None, "chg": None, "pct": None} for n in names]
+        show_items = cached_items if cached_items else placeholders
+        show_fetch_time = self._market_cache.get("last_fetch_time") or ""
         self._market_cache["error"] = None
-        self._market_cache["items"] = placeholders
         self._safe_run_task(self._set_market_loading, True)
-        self._safe_run_task(self._update_market_ui, placeholders, "")
+        self._safe_run_task(self._update_market_ui, show_items, show_fetch_time)
 
         def worker():
             fetch_time = datetime.now().strftime("%H:%M:%S")
             fetch_dt = datetime.now()
+            prev_items = self._market_cache.get("items") or []
+            prev_fetch_time = self._market_cache.get("last_fetch_time") or ""
 
             err = None
             try:
@@ -1961,14 +1957,15 @@ class FletApp:
                         }
                     )
 
+                self._market_cache["last_fetch_time"] = fetch_time
+                self._market_cache["last_fetch_dt"] = fetch_dt
+                self._market_cache["items"] = items
+
             except Exception as exc:
                 err = str(exc)
                 LOGGER.exception("市场指数刷新失败")
-                items = [{"name": n, "price": None, "chg": None, "pct": None} for n in names]
-
-            self._market_cache["last_fetch_time"] = fetch_time
-            self._market_cache["last_fetch_dt"] = fetch_dt
-            self._market_cache["items"] = items
+                items = prev_items if prev_items else placeholders
+                fetch_time = prev_fetch_time
             self._market_cache["error"] = err
             self._safe_run_task(self._update_market_ui, items, fetch_time)
 
