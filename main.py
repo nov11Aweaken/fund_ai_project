@@ -70,7 +70,7 @@ SINA_INDEX_SYMBOLS = {
 
 
 MARKET_PAGE_SIZE = 50
-MARKET_MIN_REFRESH_SECONDS = 15
+MARKET_MIN_REFRESH_SECONDS = 120
 
 
 YF_GOLD = "XAUUSD=X"
@@ -309,7 +309,7 @@ def fetch_cn_indices(names: list[str] | None = None):
     try:
         cats = ["上证系列指数", "深证系列指数", "中证系列指数"]
         frames: list[pd.DataFrame] = []
-        retry_delays = [0.6, 1.2]
+        retry_delays = [1.0]
         max_attempts = len(retry_delays) + 1
 
         for c in cats:
@@ -371,6 +371,18 @@ def fetch_cn_indices(names: list[str] | None = None):
             LOGGER.warning("EM分类请求异常: %s", " | ".join(cat_errors))
     except Exception as exc:
         errors.append(f"EM异常: {exc}")
+
+    # Supplemental: targeted Sina fetch for indices not covered by EM (e.g. 北证50)
+    em_missing = [n for n in target_names if n not in collected]
+    if em_missing:
+        try:
+            sina_rows = fetch_cn_indices_sina(em_missing)
+            for row in sina_rows:
+                name = row.get("name") or ""
+                if name and name not in collected:
+                    collected[name] = row
+        except Exception as exc:
+            LOGGER.warning("补充Sina指数失败 (%s): %s", em_missing, exc)
 
     if not collected:
         detail_parts = errors[:]
@@ -1932,7 +1944,6 @@ class FletApp:
 
         def worker():
             fetch_time = datetime.now().strftime("%H:%M:%S")
-            fetch_dt = datetime.now()
             prev_items = self._market_cache.get("items") or []
             prev_fetch_time = self._market_cache.get("last_fetch_time") or ""
 
@@ -1958,7 +1969,7 @@ class FletApp:
                     )
 
                 self._market_cache["last_fetch_time"] = fetch_time
-                self._market_cache["last_fetch_dt"] = fetch_dt
+                self._market_cache["last_fetch_dt"] = datetime.now()  # record completion time
                 self._market_cache["items"] = items
 
             except Exception as exc:
