@@ -1,7 +1,11 @@
 {
   "funds": [
     {
-      "code": "004433"
+      "code": "004433",
+      "holding": {
+        "units": 10000.0,
+        "cost_amount": 100.0
+      }
     },
     {
       "code": "025209"

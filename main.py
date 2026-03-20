@@ -29,7 +29,15 @@ matplotlib.use("Agg")
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-from funds_manager import add_fund_and_save, normalize_fund_code, preview_fund_candidate, remove_fund_and_save
+from funds_manager import (
+    add_fund_and_save,
+    calculate_holding_metrics,
+    normalize_fund_code,
+    normalize_fund_items,
+    preview_fund_candidate,
+    remove_fund_and_save,
+    update_fund_holding_and_save,
+)
 
 
 BG = "#F0F2F5"  # Window background
@@ -172,24 +180,7 @@ def load_fund_config():
         cfg_path = _config_path()
         with cfg_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-            funds = data.get("funds") or []
-
-            normalized: list[dict] = []
-            for item in funds:
-                if isinstance(item, (str, int)):
-                    code = str(item).strip()
-                    if code:
-                        normalized.append({"code": code})
-                    continue
-
-                if isinstance(item, dict):
-                    code = str(item.get("code") or "").strip()
-                    if code:
-                        # name is optional; keep if present (harmless)
-                        name = (item.get("name") or "").strip()
-                        normalized.append({"code": code, **({"name": name} if name else {})})
-
-            return normalized
+            return normalize_fund_items(data.get("funds") or [], ignore_invalid_holding=True)
     except FileNotFoundError:
         return DEFAULT_FUND_CONFIG["funds"]
     except Exception as exc:
@@ -433,7 +424,7 @@ def fetch_fund(code: str):
 def fetch_fund_estimate(code: str):
     """Fetch fund estimate (估值) from 1234567 endpoint.
 
-    Returns: {name, pct, ts, prev_nav}
+    Returns: {name, pct, ts, prev_nav, current_nav}
     """
 
     url = f"http://fundgz.1234567.com.cn/js/{code}.js"
@@ -449,10 +440,11 @@ def fetch_fund_estimate(code: str):
 
     data = json.loads(text[start : end + 1])
     name = data.get("name") or data.get("fS_name") or code
+    current_nav = float(data["gsz"]) if data.get("gsz") else None
     pct = float(data["gszzl"]) if data.get("gszzl") else None
     prev_nav = float(data["dwjz"]) if data.get("dwjz") else None
     ts = data.get("gztime") or ""
-    return {"name": name, "pct": pct, "ts": ts, "prev_nav": prev_nav}
+    return {"name": name, "pct": pct, "ts": ts, "prev_nav": prev_nav, "current_nav": current_nav}
 
 
 def fund_list_stats_from_history(code: str):
@@ -465,13 +457,17 @@ def fund_list_stats_from_history(code: str):
     series = df["单位净值"].astype(float)
 
     prev_day_pct = None
+    latest_nav = float(series.iloc[-1]) if len(series) >= 1 else None
+    history_prev_nav = float(series.iloc[-2]) if len(series) >= 2 else None
     if len(series) >= 2:
-        prev = float(series.iloc[-2])
-        last = float(series.iloc[-1])
-        if prev != 0:
-            prev_day_pct = (last - prev) / prev * 100
+        if history_prev_nav != 0:
+            prev_day_pct = (latest_nav - history_prev_nav) / history_prev_nav * 100
 
-    return {"prev_day_pct": prev_day_pct}
+    return {
+        "prev_day_pct": prev_day_pct,
+        "latest_nav": latest_nav,
+        "history_prev_nav": history_prev_nav,
+    }
 
 
 def fetch_usdcny():
@@ -988,8 +984,8 @@ class FletApp:
         # === Data card UI ===
         self.txt_header_title = ft.Text(
             default_target["label"],
-            size=14,
-            weight=ft.FontWeight.W_600,
+            size=22,
+            weight=ft.FontWeight.W_700,
             color=TEXT,
             no_wrap=True,
         )
@@ -997,42 +993,40 @@ class FletApp:
         self.prg_loading = ft.ProgressRing(visible=False, width=14, height=14, stroke_width=2, color=ACCENT)
         self.prg_market_loading = ft.ProgressRing(visible=False, width=14, height=14, stroke_width=2, color=ACCENT)
 
-        self.txt_price = ft.Text("--", size=40, weight=ft.FontWeight.BOLD, color=VALUE_TEXT, font_family=FONT_MONO)
-        self.txt_change = ft.Text("", size=20, weight=ft.FontWeight.W_600, color=SUBTEXT, font_family=FONT_MONO)
+        self.txt_price = ft.Text("--", size=44, weight=ft.FontWeight.BOLD, color=VALUE_TEXT, font_family=FONT_MONO)
+        self.txt_change = ft.Text("", size=18, weight=ft.FontWeight.W_600, color=SUBTEXT, font_family=FONT_MONO)
 
-        self.metric_left_1 = ft.Text(spans=[])
-        self.metric_left_2 = ft.Text(spans=[])
-        self.metric_left_3 = ft.Text(spans=[])
-        self.metric_right_1 = ft.Text(spans=[])
-        self.metric_right_2 = ft.Text(spans=[])
-        self.metric_right_3 = ft.Text(spans=[])
-
-        self.tbl_returns = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text("周期", color=SUBTEXT)),
-                ft.DataColumn(ft.Text("涨跌幅", color=SUBTEXT)),
-            ],
-            rows=[],
-            column_spacing=14,
-            heading_row_height=34,
-            data_row_min_height=34,
-            data_row_max_height=34,
-            divider_thickness=0,
+        self.btn_edit_detail_holding = ft.TextButton(
+            "编辑持仓",
+            on_click=self.open_current_target_holding_dialog,
+            style=ft.ButtonStyle(
+                padding=ft.Padding(14, 10, 14, 10),
+                shape=ft.RoundedRectangleBorder(radius=999),
+                color={ft.ControlState.DEFAULT: ACCENT},
+                bgcolor={ft.ControlState.DEFAULT: "#102196F3"},
+                overlay_color={ft.ControlState.HOVERED: "#162196F3"},
+            ),
         )
 
-        self.tbl_ma = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text("均线", color=SUBTEXT)),
-                ft.DataColumn(ft.Text("数值", color=SUBTEXT)),
-                ft.DataColumn(ft.Text("偏离", color=SUBTEXT)),
-            ],
-            rows=[],
-            column_spacing=18,
-            heading_row_height=34,
-            data_row_min_height=34,
-            data_row_max_height=34,
-            divider_thickness=0,
-        )
+        self.detail_holding_tiles = [
+            self._create_metric_tile("持仓份额"),
+            self._create_metric_tile("持仓成本"),
+            self._create_metric_tile("当日盈亏"),
+            self._create_metric_tile("累计盈亏"),
+        ]
+        self.detail_return_tiles = [
+            self._create_metric_tile("近3日"),
+            self._create_metric_tile("近7日"),
+            self._create_metric_tile("近15日"),
+            self._create_metric_tile("近30日"),
+        ]
+        self.detail_ma_tiles = [
+            self._create_metric_tile("估值分位"),
+            self._create_metric_tile("MA5"),
+            self._create_metric_tile("MA10"),
+            self._create_metric_tile("MA20"),
+            self._create_metric_tile("MA250"),
+        ]
 
         # Embedded chart area: static images only
         self.chart_img = ft.Image(src=b"", visible=False, expand=True, fit=ft.BoxFit.CONTAIN)
@@ -1089,7 +1083,14 @@ class FletApp:
 
         header_row = ft.Row(
             [
-                self.txt_header_title,
+                ft.Column(
+                    [
+                        self.txt_header_title,
+                        ft.Text("先看价格和盈亏概览，再看收益区间、均线和图表。", color=SUBTEXT, size=12),
+                    ],
+                    spacing=6,
+                    expand=True,
+                ),
                 ft.Row([self.prg_loading, self.txt_header_time], spacing=8),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1101,24 +1102,47 @@ class FletApp:
             vertical_alignment=ft.CrossAxisAlignment.END,
         )
 
-        header_price_card = module_card(ft.Column([header_row, price_row], spacing=10), padding=14)
-
-        returns_card = module_card(self.tbl_returns, padding=10, expand=True)
-        ma_card = module_card(self.tbl_ma, padding=10, expand=True)
-
-        tables_row = ft.Row(
-            [returns_card, ma_card],
-            spacing=12,
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.START,
+        header_price_card = module_card(
+            ft.Column(
+                [
+                    header_row,
+                    price_row,
+                    ft.Row(
+                        [
+                            ft.Container(
+                                content=ft.Text("基金详情概览", color=ACCENT, size=12, weight=ft.FontWeight.W_600),
+                                padding=ft.Padding(10, 6, 10, 6),
+                                bgcolor="#102196F3",
+                                border_radius=999,
+                            ),
+                            ft.Container(
+                                content=ft.Text("净值 / 估值实时更新", color=SUBTEXT, size=12),
+                                padding=ft.Padding(10, 6, 10, 6),
+                                bgcolor="#0D111827",
+                                border_radius=999,
+                            ),
+                        ],
+                        spacing=8,
+                    ),
+                ],
+                spacing=12,
+            ),
+            padding=16,
         )
 
         chart_header = ft.Row(
             [
-                ft.Text("静态K线图", color=SUBTEXT, size=12, weight=ft.FontWeight.W_500),
+                ft.Column(
+                    [
+                        ft.Text("净值图表", color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                        ft.Text("图表下移，核心指标先读。", color=SUBTEXT, size=12),
+                    ],
+                    spacing=4,
+                ),
                 self.btn_dynamic_kline,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         self.chart_card = ft.Container(
@@ -1139,13 +1163,41 @@ class FletApp:
         top_row = ft.Row(
             [
                 self.dd_target,
-                ft.Row([self.btn_refresh], spacing=10),
+                ft.Row([self.btn_refresh, self.btn_edit_detail_holding], spacing=10),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
+        holding_section = ft.Column(
+            [
+                ft.Text("持仓概览", color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_holding_tiles]),
+            ],
+            spacing=10,
+        )
+
+        returns_section = ft.Column(
+            [
+                ft.Text("收益区间", color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_return_tiles]),
+            ],
+            spacing=10,
+        )
+
+        ma_section = ft.Column(
+            [
+                ft.Text("均线与位置", color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_ma_tiles]),
+            ],
+            spacing=10,
+        )
+
         self.info_card = ft.Container(
-            content=ft.Column([top_row, header_price_card, tables_row, self.chart_card], spacing=12, expand=True),
+            content=ft.Column(
+                [top_row, header_price_card, holding_section, returns_section, ma_section, self.chart_card],
+                spacing=14,
+                expand=True,
+            ),
             padding=16,
             bgcolor=SURFACE,
             border_radius=20,
@@ -1167,45 +1219,27 @@ class FletApp:
         )
 
         # === Fund list view ===
-        self.txt_fund_list_col_est = ft.Text("实时估值", color=SUBTEXT, text_align=ft.TextAlign.CENTER)
-        self.txt_fund_list_col_prev_nav = ft.Text(
-            self._fund_prev_trade_day_nav_header(),
-            color=SUBTEXT,
-            weight=ft.FontWeight.W_600,
-            text_align=ft.TextAlign.CENTER,
-        )
-        def make_sort_btn(icon, on_click, tooltip):
-            return ft.IconButton(
-                icon,
-                on_click=on_click,
-                icon_color=SUBTEXT,
-                icon_size=12,
-                width=16,
-                height=16,
-                style=ft.ButtonStyle(padding=0),
+        self.txt_fund_list_title = ft.Text("基金概览", color=TEXT, size=20, weight=ft.FontWeight.W_700)
+        self.txt_fund_list_sort_state = ft.Text("默认排序", color=SUBTEXT, size=12)
+
+        def make_sort_btn(label, field, desc, tooltip):
+            return ft.TextButton(
+                label,
+                on_click=lambda e: self.on_fund_list_sort(field, desc),
                 tooltip=tooltip,
+                style=ft.ButtonStyle(
+                    padding=ft.Padding(12, 8, 12, 8),
+                    shape=ft.RoundedRectangleBorder(radius=999),
+                    color={ft.ControlState.DEFAULT: SUBTEXT},
+                    bgcolor={ft.ControlState.DEFAULT: "#00FFFFFF"},
+                    overlay_color={ft.ControlState.HOVERED: "#142196F3"},
+                ),
             )
 
-        self.btn_fund_list_sort_est_asc = make_sort_btn(
-            ft.Icons.ARROW_DROP_UP,
-            lambda e: self.on_fund_list_sort("est_pct", False),
-            "实时估值升序",
-        )
-        self.btn_fund_list_sort_est_desc = make_sort_btn(
-            ft.Icons.ARROW_DROP_DOWN,
-            lambda e: self.on_fund_list_sort("est_pct", True),
-            "实时估值降序",
-        )
-        self.btn_fund_list_sort_prev_asc = make_sort_btn(
-            ft.Icons.ARROW_DROP_UP,
-            lambda e: self.on_fund_list_sort("prev_day_pct", False),
-            "净值变化升序",
-        )
-        self.btn_fund_list_sort_prev_desc = make_sort_btn(
-            ft.Icons.ARROW_DROP_DOWN,
-            lambda e: self.on_fund_list_sort("prev_day_pct", True),
-            "净值变化降序",
-        )
+        self.btn_fund_list_sort_est_asc = make_sort_btn("估值 ↑", "est_pct", False, "实时估值升序")
+        self.btn_fund_list_sort_est_desc = make_sort_btn("估值 ↓", "est_pct", True, "实时估值降序")
+        self.btn_fund_list_sort_prev_asc = make_sort_btn("净值 ↑", "prev_day_pct", False, "净值变化升序")
+        self.btn_fund_list_sort_prev_desc = make_sort_btn("净值 ↓", "prev_day_pct", True, "净值变化降序")
         self.txt_fund_list_page_info = ft.Text("第 1/1 页 · 共 0 条", color=SUBTEXT, size=12)
         self.prg_fund_list_loading = ft.ProgressRing(visible=False, width=14, height=14, stroke_width=2, color=ACCENT)
         self.btn_fund_list_refresh = ft.IconButton(
@@ -1220,56 +1254,45 @@ class FletApp:
             icon_color=ACCENT,
             tooltip="添加基金",
         )
-
-        self._fund_list_pct_width = 122
-        self._fund_list_action_width = 170
-        est_header_cell = ft.Row(
+        fund_list_header_row = ft.Column(
             [
-                self.txt_fund_list_col_est,
-                ft.Column(
-                    [self.btn_fund_list_sort_est_asc, self.btn_fund_list_sort_est_desc],
-                    spacing=-6,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    tight=True,
+                ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                self.txt_fund_list_title,
+                                ft.Text("用卡片概览展示每只基金的行情、持仓与盈亏。", color=SUBTEXT, size=12),
+                            ],
+                            spacing=4,
+                            expand=True,
+                        ),
+                        ft.Row(
+                            [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add],
+                            spacing=6,
+                            alignment=ft.MainAxisAlignment.END,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=2,
-        )
-        prev_nav_header_cell = ft.Row(
-            [
-                self.txt_fund_list_col_prev_nav,
-                ft.Column(
-                    [self.btn_fund_list_sort_prev_asc, self.btn_fund_list_sort_prev_desc],
-                    spacing=-6,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    tight=True,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=2,
-        )
-        fund_list_header_row = ft.Row(
-            [
-                ft.Container(
-                    content=ft.Text("     基金", color=SUBTEXT, weight=ft.FontWeight.W_600, text_align=ft.TextAlign.LEFT),
-                    expand=True,
-                    alignment=ft.Alignment(-1, 0),
-                ),
-                self._fund_list_right_cell(est_header_cell),
-                self._fund_list_right_cell(prev_nav_header_cell),
-                self._fund_list_action_cell(
-                    ft.Row(
-                        [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add],
-                        spacing=6,
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    )
+                ft.Row(
+                    [
+                        ft.Container(
+                            content=self.txt_fund_list_sort_state,
+                            padding=ft.Padding(12, 8, 12, 8),
+                            bgcolor="#0F2196F3",
+                            border_radius=999,
+                        ),
+                        self.btn_fund_list_sort_est_asc,
+                        self.btn_fund_list_sort_est_desc,
+                        self.btn_fund_list_sort_prev_asc,
+                        self.btn_fund_list_sort_prev_desc,
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
             spacing=12,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         self.fund_list_list = ft.ListView(
@@ -1343,34 +1366,6 @@ class FletApp:
             icon_color=ACCENT,
         )
 
-        self._market_col_price_w = 110
-        self._market_col_chg_w = 110
-        self._market_col_pct_w = 110
-
-        market_header_row = ft.Row(
-            [
-                ft.Container(
-                    content=ft.Text("     指数", color=SUBTEXT, weight=ft.FontWeight.W_600, text_align=ft.TextAlign.LEFT),
-                    expand=True,
-                    alignment=ft.Alignment(-1, 0),
-                ),
-                ft.Container(
-                    width=self._market_col_price_w,
-                    content=ft.Row([ft.Text("最新", color=SUBTEXT, weight=ft.FontWeight.W_600)], alignment=ft.MainAxisAlignment.CENTER),
-                ),
-                ft.Container(
-                    width=self._market_col_chg_w,
-                    content=ft.Row([ft.Text("涨跌", color=SUBTEXT, weight=ft.FontWeight.W_600)], alignment=ft.MainAxisAlignment.CENTER),
-                ),
-                ft.Container(
-                    width=self._market_col_pct_w,
-                    content=ft.Row([ft.Text("涨跌幅", color=SUBTEXT, weight=ft.FontWeight.W_600)], alignment=ft.MainAxisAlignment.CENTER),
-                ),
-            ],
-            spacing=12,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
         self.market_list = ft.ListView(
             expand=True,
             spacing=10,
@@ -1391,15 +1386,35 @@ class FletApp:
 
         market_top_bar = ft.Row(
             [
-                ft.Text("大盘行情", size=14, weight=ft.FontWeight.W_700, color=TEXT),
+                ft.Column(
+                    [
+                        ft.Text("大盘行情", size=20, weight=ft.FontWeight.W_700, color=TEXT),
+                        ft.Text("用卡片概览快速查看指数涨跌与波动。", color=SUBTEXT, size=12),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
                 ft.Row([self.prg_market_loading, self.txt_market_time, self.btn_market_refresh], spacing=8),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         market_pager_bar = ft.Row(
             [
-                ft.Row([self.btn_market_prev, self.btn_market_next, self.txt_market_page_info], spacing=6),
+                ft.Row(
+                    [
+                        self.btn_market_prev,
+                        self.btn_market_next,
+                        ft.Container(
+                            content=self.txt_market_page_info,
+                            padding=ft.Padding(12, 8, 12, 8),
+                            bgcolor="#0F2196F3",
+                            border_radius=999,
+                        ),
+                    ],
+                    spacing=6,
+                ),
                 ft.Container(),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1409,8 +1424,6 @@ class FletApp:
             content=ft.Column(
                 [
                     market_top_bar,
-                    ft.Container(height=1, bgcolor="#14000000"),
-                    market_header_row,
                     ft.Container(height=1, bgcolor="#14000000"),
                     self.market_list,
                     ft.Container(height=1, bgcolor="#14000000"),
@@ -1547,13 +1560,33 @@ class FletApp:
         fetch_time = self._fund_list_cache.get("last_fetch_time") or datetime.now().strftime("%H:%M:%S")
         self._safe_run_task(self._update_fund_list_ui, items, fetch_time)
 
+    def _fund_list_sort_summary(self) -> str:
+        sort_field = getattr(self, "_fund_list_sort_field", None)
+        sort_desc = bool(getattr(self, "_fund_list_sort_desc", False))
+        if sort_field == "est_pct":
+            return "按实时估值降序" if sort_desc else "按实时估值升序"
+        if sort_field == "prev_day_pct":
+            return "按净值变化降序" if sort_desc else "按净值变化升序"
+        return "默认排序"
+
     def _update_fund_list_sort_icons(self):
         sort_field = getattr(self, "_fund_list_sort_field", None)
         sort_desc = bool(getattr(self, "_fund_list_sort_desc", False))
-        self.btn_fund_list_sort_est_asc.icon_color = ACCENT if sort_field == "est_pct" and not sort_desc else SUBTEXT
-        self.btn_fund_list_sort_est_desc.icon_color = ACCENT if sort_field == "est_pct" and sort_desc else SUBTEXT
-        self.btn_fund_list_sort_prev_asc.icon_color = ACCENT if sort_field == "prev_day_pct" and not sort_desc else SUBTEXT
-        self.btn_fund_list_sort_prev_desc.icon_color = ACCENT if sort_field == "prev_day_pct" and sort_desc else SUBTEXT
+        self.txt_fund_list_sort_state.value = self._fund_list_sort_summary()
+
+        def apply_style(button: ft.TextButton, active: bool):
+            button.style = ft.ButtonStyle(
+                padding=ft.Padding(12, 8, 12, 8),
+                shape=ft.RoundedRectangleBorder(radius=999),
+                color={ft.ControlState.DEFAULT: (ACCENT if active else SUBTEXT)},
+                bgcolor={ft.ControlState.DEFAULT: ("#122196F3" if active else "#00FFFFFF")},
+                overlay_color={ft.ControlState.HOVERED: "#142196F3"},
+            )
+
+        apply_style(self.btn_fund_list_sort_est_asc, sort_field == "est_pct" and not sort_desc)
+        apply_style(self.btn_fund_list_sort_est_desc, sort_field == "est_pct" and sort_desc)
+        apply_style(self.btn_fund_list_sort_prev_asc, sort_field == "prev_day_pct" and not sort_desc)
+        apply_style(self.btn_fund_list_sort_prev_desc, sort_field == "prev_day_pct" and sort_desc)
 
     def _sort_fund_list_items(self, items: list[dict]) -> list[dict]:
         sort_field = getattr(self, "_fund_list_sort_field", None)
@@ -1734,7 +1767,7 @@ class FletApp:
             return
 
         try:
-            funds_path = _app_dir() / "funds.json"
+            funds_path = _config_path()
             self.funds = add_fund_and_save(self.funds, code, funds_path)
         except (ValueError, OSError) as exc:
             # Close preview dialog first so failure feedback is clearly visible.
@@ -1753,6 +1786,166 @@ class FletApp:
         self._hydrate_fund_names_async()
         self.refresh_fund_list()
         self._show_message("已添加到列表")
+
+    def _get_fund_config_item(self, code: str) -> dict:
+        normalized_code = normalize_fund_code(code)
+        for item in self.funds or []:
+            if isinstance(item, dict) and normalize_fund_code(item.get("code")) == normalized_code:
+                return item
+        return {}
+
+    def _on_holding_form_change(self, field_name: str, value: str):
+        state = getattr(self, "_holding_form_state", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._holding_form_state = state
+        state[field_name] = str(value or "")
+
+    def _read_holding_form_values(self) -> tuple[str, str]:
+        state = getattr(self, "_holding_form_state", None)
+        if not isinstance(state, dict):
+            state = {}
+
+        units_field = getattr(self, "_holding_units_field", None)
+        cost_field = getattr(self, "_holding_cost_field", None)
+        units_text = str(getattr(units_field, "value", "") or state.get("units") or "").strip()
+        cost_text = str(getattr(cost_field, "value", "") or state.get("cost_amount") or "").strip()
+        return units_text, cost_text
+
+    def _show_holding_form_error(self, message: str):
+        error_text = getattr(self, "_holding_form_error_text", None)
+        if error_text is not None:
+            error_text.value = str(message or "")
+            error_text.visible = bool(message)
+            self.page.update()
+
+    def _apply_holding_to_cached_items(self, code: str, holding: dict) -> tuple[list[dict], str]:
+        normalized_code = normalize_fund_code(code)
+        cached_items = self._fund_list_cache.get("items") or []
+        fetch_time = datetime.now().strftime("%H:%M:%S")
+        local_items: list[dict] = []
+
+        for item in cached_items:
+            local_item = dict(item)
+            if normalize_fund_code(local_item.get("code")) == normalized_code:
+                local_item["holding_units"] = holding.get("units")
+                local_item["holding_cost_amount"] = holding.get("cost_amount")
+                local_item.update(
+                    calculate_holding_metrics(
+                        units=local_item.get("holding_units"),
+                        cost_amount=local_item.get("holding_cost_amount"),
+                        current_nav=local_item.get("current_nav"),
+                        previous_nav=local_item.get("previous_nav"),
+                    )
+                )
+            local_items.append(local_item)
+
+        self._fund_list_cache["items"] = local_items
+        self._fund_list_cache["last_fetch_time"] = fetch_time
+        return local_items, fetch_time
+
+    def open_holding_dialog(self, code: str, name: str):
+        normalized_code = normalize_fund_code(code)
+        if not normalized_code:
+            self._show_message("基金代码无效")
+            return
+
+        fund_item = self._get_fund_config_item(normalized_code)
+        existing_holding = fund_item.get("holding") if isinstance(fund_item, dict) else {}
+        units = existing_holding.get("units") if isinstance(existing_holding, dict) else None
+        cost_amount = existing_holding.get("cost_amount") if isinstance(existing_holding, dict) else None
+
+        self._pending_holding_target = {"code": normalized_code, "name": (name or "").strip() or normalized_code}
+        units_value = "" if units is None else f"{float(units):.4f}".rstrip("0").rstrip(".")
+        cost_value = "" if cost_amount is None else f"{float(cost_amount):.2f}"
+        self._holding_form_state = {"units": units_value, "cost_amount": cost_value}
+        self._holding_units_field = ft.TextField(
+            label="持有份额",
+            hint_text="例如 1234.56",
+            value=units_value,
+            autofocus=True,
+            on_submit=self.on_holding_save_confirm,
+            on_change=lambda e: self._on_holding_form_change("units", e.control.value),
+            width=260,
+        )
+        self._holding_cost_field = ft.TextField(
+            label="持仓成本（元）",
+            hint_text="例如 1500.00",
+            value=cost_value,
+            on_submit=self.on_holding_save_confirm,
+            on_change=lambda e: self._on_holding_form_change("cost_amount", e.control.value),
+            width=260,
+        )
+        self._holding_form_error_text = ft.Text("", color=DOWN, size=12, visible=False)
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"编辑持仓 - {(name or normalized_code)}"),
+            content=ft.Column(
+                [
+                    self._holding_units_field,
+                    self._holding_cost_field,
+                    self._holding_form_error_text,
+                    ft.Text("用于计算当前市值、当日盈亏和累计盈亏。", color=SUBTEXT, size=12),
+                ],
+                tight=True,
+                spacing=10,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                ft.Button("保存", on_click=self.on_holding_save_confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_holding_save_confirm(self, e=None):
+        pending = getattr(self, "_pending_holding_target", None) or {}
+        code = normalize_fund_code(pending.get("code"))
+        if not code:
+            self._show_message("基金代码无效")
+            return
+
+        units_text, cost_text = self._read_holding_form_values()
+        if not units_text or not cost_text:
+            self._show_holding_form_error("请填写持有份额和持仓成本")
+            self._show_message("请填写持有份额和持仓成本")
+            return
+
+        try:
+            units = float(units_text)
+        except ValueError:
+            self._show_holding_form_error("持有份额必须是数字")
+            self._show_message("持有份额必须是数字")
+            return
+
+        try:
+            cost_amount = float(cost_text)
+        except ValueError:
+            self._show_holding_form_error("持仓成本必须是数字")
+            self._show_message("持仓成本必须是数字")
+            return
+
+        try:
+            funds_path = _config_path()
+            self.funds = update_fund_holding_and_save(self.funds, code, units, cost_amount, funds_path)
+        except (ValueError, OSError) as exc:
+            self._show_holding_form_error(str(exc))
+            self._show_message(f"保存持仓失败：{exc}")
+            return
+
+        self._show_holding_form_error("")
+        local_items, fetch_time = self._apply_holding_to_cached_items(
+            code,
+            {"units": units, "cost_amount": cost_amount},
+        )
+        self._close_dialog()
+        if local_items:
+            self._safe_run_task(self._update_fund_list_ui, local_items, fetch_time)
+        elif self.active_tab == "fund_list":
+            self.refresh_fund_list()
+        if self.active_tab == "fund" and normalize_fund_code(self.current_target_data().get("code")) == code:
+            self.manual_refresh()
+        self._show_message("持仓已保存")
 
     def open_delete_fund_confirm_dialog(self, code: str, name: str):
         normalized = normalize_fund_code(code)
@@ -1781,7 +1974,7 @@ class FletApp:
             return
 
         try:
-            funds_path = _app_dir() / "funds.json"
+            funds_path = _config_path()
             self.funds = remove_fund_and_save(self.funds, code, funds_path)
         except (ValueError, OSError) as exc:
             self._show_message(f"删除失败：{exc}")
@@ -1805,6 +1998,15 @@ class FletApp:
         self._set_tab_selected("fund_list" if deleting_current else self.active_tab)
         self._safe_run_task(self._update_fund_list_ui, local_items, fetch_time)
         self._show_message("已删除基金")
+
+    def open_current_target_holding_dialog(self, e=None):
+        tgt = self.current_target_data()
+        code = normalize_fund_code(tgt.get("code"))
+        if not code:
+            self._show_message("暂无基金")
+            return
+        name = str(tgt.get("label") or "").strip() or code
+        self.open_holding_dialog(code, name)
 
     def refresh_current_view(self, e):
         if self.active_tab == "fund_list":
@@ -1964,35 +2166,35 @@ class FletApp:
 
         rows: list[ft.Control] = []
         for it in page_items:
-            name = (it.get("name") or "").strip() or "--"
-            price = it.get("price")
-            chg = it.get("chg")
-            pct = it.get("pct")
-
-            row = ft.Row(
-                [
+            card_data = self._build_market_overview_card_data(it)
+            metric_controls: list[ft.Control] = []
+            for metric in card_data["metrics"]:
+                metric_controls.append(
                     ft.Container(
-                        content=ft.Text(name, color=TEXT, no_wrap=True, weight=ft.FontWeight.W_600, text_align=ft.TextAlign.LEFT),
                         expand=True,
-                        alignment=ft.Alignment(-1, 0),
-                    ),
-                    ft.Container(
-                        width=self._market_col_price_w,
-                        content=ft.Row([ft.Text(fmt_price(price), color=VALUE_TEXT, weight=ft.FontWeight.W_600, font_family=FONT_MONO)], alignment=ft.MainAxisAlignment.CENTER),
-                    ),
-                    ft.Container(
-                        width=self._market_col_chg_w,
-                        content=ft.Row([ft.Text(fmt_chg(chg), color=col_color(chg), weight=ft.FontWeight.W_600, font_family=FONT_MONO)], alignment=ft.MainAxisAlignment.CENTER),
-                    ),
-                    ft.Container(
-                        width=self._market_col_pct_w,
-                        content=ft.Row([ft.Text(fmt_pct(pct), color=col_color(pct), weight=ft.FontWeight.W_600, font_family=FONT_MONO)], alignment=ft.MainAxisAlignment.CENTER),
-                    ),
+                        padding=12,
+                        bgcolor="#F8FAFC",
+                        border_radius=16,
+                        border=ft.Border.all(1, "#120F172A"),
+                        content=ft.Column(
+                            [
+                                ft.Text(metric["label"], color=SUBTEXT, size=11),
+                                ft.Text(metric["value"], color=metric["color"], size=16, weight=ft.FontWeight.W_700, font_family=FONT_MONO),
+                            ],
+                            spacing=6,
+                        ),
+                    )
+                )
+
+            card = ft.Column(
+                [
+                    ft.Text(card_data["title"], color=TEXT, size=17, weight=ft.FontWeight.W_700),
+                    ft.Text(card_data["subtitle"], color=SUBTEXT, size=12),
+                    ft.Row(metric_controls, spacing=10),
                 ],
                 spacing=12,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-            rows.append(self._module_card(row, padding=10))
+            rows.append(self._module_card(card, padding=16))
 
         if not rows:
             rows = [self._module_card(ft.Text("暂无数据", color=SUBTEXT), padding=12)]
@@ -2036,13 +2238,28 @@ class FletApp:
                     "name": cfg_name or cached_name,
                     "est_pct": None,
                     "prev_day_pct": None,
+                    "current_nav": None,
+                    "previous_nav": None,
+                    "holding_units": None,
+                    "holding_cost_amount": None,
+                    "daily_profit": None,
+                    "daily_profit_pct": None,
+                    "total_profit": None,
+                    "total_profit_pct": None,
                     "error": None,
                 }
+
+                holding = f.get("holding") if isinstance(f, dict) else None
+                if isinstance(holding, dict):
+                    row["holding_units"] = holding.get("units")
+                    row["holding_cost_amount"] = holding.get("cost_amount")
 
                 try:
                     est = fetch_fund_estimate(code)
                     row["name"] = cfg_name or (est.get("name") or "").strip() or cached_name or code
                     row["est_pct"] = est.get("pct")
+                    row["current_nav"] = est.get("current_nav")
+                    row["previous_nav"] = est.get("prev_nav")
                 except Exception as exc:
                     LOGGER.exception("Fund estimate failed: %s", code)
                     row["error"] = str(exc)
@@ -2053,6 +2270,20 @@ class FletApp:
                 except Exception as exc:
                     LOGGER.exception("Fund history(list) failed: %s", code)
                     row["error"] = (row["error"] + " | " if row["error"] else "") + str(exc)
+
+                if row["current_nav"] is None:
+                    row["current_nav"] = row.get("latest_nav")
+                if row["previous_nav"] is None:
+                    row["previous_nav"] = row.get("history_prev_nav")
+
+                row.update(
+                    calculate_holding_metrics(
+                        units=row.get("holding_units"),
+                        cost_amount=row.get("holding_cost_amount"),
+                        current_nav=row.get("current_nav"),
+                        previous_nav=row.get("previous_nav"),
+                    )
+                )
 
                 items.append(row)
 
@@ -2079,8 +2310,7 @@ class FletApp:
         if self.active_tab != "fund_list":
             return
 
-        self.txt_fund_list_col_est.value = "实时估值"
-        self.txt_fund_list_col_prev_nav.value = self._fund_prev_trade_day_nav_header()
+        prev_nav_label = self._fund_prev_trade_day_nav_header()
         self._update_fund_list_sort_icons()
         render_items = self._sort_fund_list_items(items)
         self.txt_fund_list_page_info.value = f"第 1/1 页 · 共 {len(items or [])} 条 · 更新于 {fetch_time}"
@@ -2090,55 +2320,97 @@ class FletApp:
             name = (it.get("name") or "").strip() or it.get("code")
             code = it.get("code")
             title = f"{name} ({code})" if code else name
+            holding_action_label = "编辑持仓" if it.get("holding_units") is not None else "录入持仓"
 
             name_color = TEXT if not it.get("error") else SUBTEXT
+            has_holding = it.get("holding_units") is not None
+            metrics = self._build_fund_overview_metrics(it, prev_nav_label)
 
-            row = ft.Row(
+            tags = ft.Row(
                 [
                     ft.Container(
-                        content=ft.Text(
-                            title,
-                            color=name_color,
-                            no_wrap=True,
-                            weight=ft.FontWeight.W_600,
-                            text_align=ft.TextAlign.LEFT,
-                        ),
-                        expand=True,
-                        alignment=ft.Alignment(-1, 0),
+                        content=ft.Text("估值中" if it.get("est_pct") is not None else "待刷新", size=11, color=ACCENT),
+                        padding=ft.Padding(8, 4, 8, 4),
+                        bgcolor="#102196F3",
+                        border_radius=999,
                     ),
-                    self._fund_list_right_cell(self._pct_text(it.get("est_pct"))),
-                    self._fund_list_right_cell(self._pct_text(it.get("prev_day_pct"))),
-                    self._fund_list_action_cell(
-                        ft.Row(
-                            [
-                                ft.TextButton(
-                                    "详情",
-                                    on_click=(lambda e, c=code: self.open_fund_detail(c)),
-                                    style=ft.ButtonStyle(
-                                        color={ft.ControlState.DEFAULT: ACCENT},
-                                        overlay_color={ft.ControlState.HOVERED: "#1A2196F3"},
-                                    ),
-                                ),
-                                ft.TextButton(
-                                    "删除",
-                                    on_click=(lambda e, c=code, n=name: self.open_delete_fund_confirm_dialog(c, n)),
-                                    style=ft.ButtonStyle(
-                                        color={ft.ControlState.DEFAULT: DOWN},
-                                        overlay_color={ft.ControlState.HOVERED: "#1A4CAF50"},
-                                    ),
-                                ),
-                            ],
-                            alignment=ft.MainAxisAlignment.CENTER,
-                            spacing=4,
-                        )
-                        if code
-                        else ft.Text("", color=SUBTEXT)
+                    ft.Container(
+                        content=ft.Text("有持仓" if has_holding else "未录入持仓", size=11, color=(TEXT if has_holding else SUBTEXT)),
+                        padding=ft.Padding(8, 4, 8, 4),
+                        bgcolor="#0D111827",
+                        border_radius=999,
                     ),
                 ],
-                spacing=12,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
             )
-            cards.append(self._module_card(row, padding=10))
+
+            actions = (
+                ft.Row(
+                    [
+                        ft.TextButton(
+                            "详情",
+                            on_click=(lambda e, c=code: self.open_fund_detail(c)),
+                            style=ft.ButtonStyle(
+                                padding=ft.Padding(12, 8, 12, 8),
+                                shape=ft.RoundedRectangleBorder(radius=999),
+                                color={ft.ControlState.DEFAULT: ACCENT},
+                                overlay_color={ft.ControlState.HOVERED: "#142196F3"},
+                            ),
+                        ),
+                        ft.TextButton(
+                            holding_action_label,
+                            on_click=(lambda e, c=code, n=name: self.open_holding_dialog(c, n)),
+                            style=ft.ButtonStyle(
+                                padding=ft.Padding(12, 8, 12, 8),
+                                shape=ft.RoundedRectangleBorder(radius=999),
+                                color={ft.ControlState.DEFAULT: ACCENT},
+                                bgcolor={ft.ControlState.DEFAULT: "#102196F3"},
+                                overlay_color={ft.ControlState.HOVERED: "#162196F3"},
+                            ),
+                        ),
+                        ft.IconButton(
+                            ft.Icons.DELETE_OUTLINE,
+                            on_click=(lambda e, c=code, n=name: self.open_delete_fund_confirm_dialog(c, n)),
+                            icon_color=DOWN,
+                            tooltip="删除基金",
+                        ),
+                    ],
+                    spacing=6,
+                )
+                if code
+                else ft.Text("", color=SUBTEXT)
+            )
+
+            metric_controls = []
+            for metric in metrics:
+                metric_controls.append(
+                    ft.Container(
+                        expand=True,
+                        padding=12,
+                        bgcolor="#F8FAFC",
+                        border_radius=16,
+                        border=ft.Border.all(1, "#120F172A"),
+                        content=ft.Column(
+                            [
+                                ft.Text(metric["label"], color=SUBTEXT, size=11),
+                                ft.Text(metric["primary"], color=metric["color"], size=16, weight=ft.FontWeight.W_700, font_family=FONT_MONO),
+                                ft.Text(metric["secondary"], color=SUBTEXT, size=11, no_wrap=True),
+                            ],
+                            spacing=6,
+                        ),
+                    )
+                )
+
+            card = ft.Column(
+                [
+                    ft.Text(title, color=name_color, size=17, weight=ft.FontWeight.W_700, no_wrap=True),
+                    tags,
+                    actions,
+                    ft.Row(metric_controls, spacing=10),
+                ],
+                spacing=12,
+            )
+            cards.append(self._module_card(card, padding=16))
 
         self.fund_list_list.controls = cards
         self.page.update()
@@ -2158,6 +2430,215 @@ class FletApp:
             ft.TextSpan(value, style=ft.TextStyle(color=value_color, weight=ft.FontWeight.W_600)),
         ]
 
+    def _create_metric_tile(self, label: str, *, width: int = 220) -> dict:
+        label_text = ft.Text(label, color=SUBTEXT, size=11)
+        value_text = ft.Text("--", color=VALUE_TEXT, size=17, weight=ft.FontWeight.W_700, font_family=FONT_MONO)
+        subtitle_text = ft.Text("", color=SUBTEXT, size=11)
+        card = self._module_card(ft.Column([label_text, value_text, subtitle_text], spacing=6), padding=12)
+        return {
+            "wrapper": ft.Container(width=width, content=card),
+            "label": label_text,
+            "value": value_text,
+            "subtitle": subtitle_text,
+        }
+
+    def _build_metric_wrap_row(self, controls: list[ft.Control]) -> ft.Row:
+        return ft.Row(
+            controls,
+            spacing=12,
+            wrap=True,
+            run_spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+
+    def _apply_metric_tile(self, tile: dict, *, label: str, value: str, subtitle: str = "", color: str = VALUE_TEXT):
+        tile["label"].value = label
+        tile["value"].value = value
+        tile["value"].color = color
+        tile["subtitle"].value = subtitle
+
+    def _format_pct_value(self, raw_value, *, signed: bool = True) -> str:
+        if raw_value is None:
+            return "--"
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return "--"
+        if signed:
+            return f"{'+' if value > 0 else ''}{value:.2f}%"
+        return f"{value:.2f}%"
+
+    def _format_number_value(self, raw_value, *, digits: int = 2, suffix: str = "") -> str:
+        if raw_value is None:
+            return "--"
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return "--"
+        return f"{value:.{digits}f}{suffix}"
+
+    def _format_money_value(self, raw_value, *, signed: bool = False) -> str:
+        if raw_value is None:
+            return "--"
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return "--"
+        if signed:
+            return f"+¥{value:.2f}" if value > 0 else f"-¥{abs(value):.2f}" if value < 0 else f"¥{value:.2f}"
+        return f"¥{value:.2f}"
+
+    def _metric_color(self, raw_value, default: str = VALUE_TEXT) -> str:
+        if raw_value is None:
+            return SUBTEXT
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return SUBTEXT
+        return UP if value > 0 else DOWN if value < 0 else default
+
+    def _build_market_overview_card_data(self, item: dict) -> dict:
+        code = str(item.get("code") or "").strip()
+        return {
+            "title": (item.get("name") or "").strip() or "--",
+            "subtitle": f"代码 {code}" if code else "指数",
+            "metrics": [
+                {"label": "最新价", "value": FletApp._format_number_value(self, item.get("price")), "color": VALUE_TEXT},
+                {"label": "涨跌", "value": FletApp._format_number_value(self, item.get("chg")), "color": FletApp._metric_color(self, item.get("chg"))},
+                {"label": "涨跌幅", "value": FletApp._format_pct_value(self, item.get("pct")), "color": FletApp._metric_color(self, item.get("pct"))},
+            ],
+        }
+
+    def _build_fund_detail_holding_metrics(self, item: dict) -> list[dict]:
+        return [
+            {
+                "label": "持仓份额",
+                "value": FletApp._format_number_value(self, item.get("holding_units"), suffix="份"),
+                "subtitle": "当前持有份额",
+                "color": VALUE_TEXT if item.get("holding_units") is not None else SUBTEXT,
+            },
+            {
+                "label": "持仓成本",
+                "value": FletApp._format_money_value(self, item.get("holding_cost_amount")),
+                "subtitle": "当前总持仓成本",
+                "color": VALUE_TEXT if item.get("holding_cost_amount") is not None else SUBTEXT,
+            },
+            {
+                "label": "当日盈亏",
+                "value": FletApp._format_money_value(self, item.get("daily_profit"), signed=True),
+                "subtitle": "按估值与昨收净值计算",
+                "color": FletApp._metric_color(self, item.get("daily_profit")),
+            },
+            {
+                "label": "累计盈亏",
+                "value": FletApp._format_money_value(self, item.get("total_profit"), signed=True),
+                "subtitle": "当前市值 - 持仓成本",
+                "color": FletApp._metric_color(self, item.get("total_profit")),
+            },
+        ]
+
+    def _build_fund_detail_return_metrics(self, res: dict) -> list[dict]:
+        return [
+            {"label": "近3日", "value": self._format_pct_value(res.get("chg3")), "subtitle": "短线表现", "color": self._metric_color(res.get("chg3"))},
+            {"label": "近7日", "value": self._format_pct_value(res.get("chg7")), "subtitle": "一周趋势", "color": self._metric_color(res.get("chg7"))},
+            {"label": "近15日", "value": self._format_pct_value(res.get("chg15")), "subtitle": "半月趋势", "color": self._metric_color(res.get("chg15"))},
+            {"label": "近30日", "value": self._format_pct_value(res.get("chg30")), "subtitle": "月度表现", "color": self._metric_color(res.get("chg30"))},
+        ]
+
+    def _build_fund_detail_ma_metrics(self, res: dict) -> list[dict]:
+        metrics = [
+            {"label": "估值分位", "value": self._format_pct_value(res.get("percentile"), signed=False), "subtitle": "近历史区间位置", "color": VALUE_TEXT},
+        ]
+        for label, ma_key, dist_key in [
+            ("MA5", "ma5", "dist_ma5"),
+            ("MA10", "ma10", "dist_ma10"),
+            ("MA20", "ma20", "dist_ma20"),
+            ("MA250", "ma250", "dist_ma250"),
+        ]:
+            metrics.append(
+                {
+                    "label": label,
+                    "value": self._format_number_value(res.get(ma_key), digits=4),
+                    "subtitle": f"偏离 {self._format_pct_value(res.get(dist_key))}",
+                    "color": self._metric_color(res.get(dist_key), VALUE_TEXT),
+                }
+            )
+        return metrics
+
+    def _apply_metric_group(self, tiles: list[dict], metrics: list[dict]):
+        for index, tile in enumerate(tiles):
+            metric = metrics[index] if index < len(metrics) else {"label": "--", "value": "--", "subtitle": "", "color": SUBTEXT}
+            self._apply_metric_tile(
+                tile,
+                label=metric.get("label", "--"),
+                value=metric.get("value", "--"),
+                subtitle=metric.get("subtitle", ""),
+                color=metric.get("color", VALUE_TEXT),
+            )
+
+    def _build_fund_overview_metrics(self, item: dict, prev_nav_label: str) -> list[dict]:
+        def pct_text(raw_value):
+            if raw_value is None:
+                return "--"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                return "--"
+            return f"{'+' if value > 0 else ''}{value:.2f}%"
+
+        def number_text(raw_value, suffix=""):
+            if raw_value is None:
+                return "--"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                return "--"
+            return f"{value:.2f}{suffix}"
+
+        def money_text(raw_value, *, signed=False):
+            if raw_value is None:
+                return "--"
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                return "--"
+            if signed:
+                return f"+¥{value:.2f}" if value > 0 else f"-¥{abs(value):.2f}" if value < 0 else f"¥{value:.2f}"
+            return f"¥{value:.2f}"
+
+        return [
+            {
+                "label": "行情",
+                "primary": pct_text(item.get("est_pct")),
+                "secondary": f"{prev_nav_label} {pct_text(item.get('prev_day_pct'))}",
+                "color": (UP if (item.get("est_pct") or 0) > 0 else DOWN if (item.get("est_pct") or 0) < 0 else VALUE_TEXT)
+                if item.get("est_pct") is not None
+                else SUBTEXT,
+            },
+            {
+                "label": "持仓",
+                "primary": number_text(item.get("holding_units"), "份"),
+                "secondary": f"持仓成本 {money_text(item.get('holding_cost_amount'))}",
+                "color": VALUE_TEXT if item.get("holding_units") is not None else SUBTEXT,
+            },
+            {
+                "label": "当日盈亏",
+                "primary": money_text(item.get("daily_profit"), signed=True),
+                "secondary": "根据当日估值计算" if item.get("daily_profit") is not None else "录入持仓后显示",
+                "color": (UP if (item.get("daily_profit") or 0) > 0 else DOWN if (item.get("daily_profit") or 0) < 0 else VALUE_TEXT)
+                if item.get("daily_profit") is not None
+                else SUBTEXT,
+            },
+            {
+                "label": "累计盈亏",
+                "primary": money_text(item.get("total_profit"), signed=True),
+                "secondary": "当前市值 - 持仓成本" if item.get("total_profit") is not None else "录入持仓后显示",
+                "color": (UP if (item.get("total_profit") or 0) > 0 else DOWN if (item.get("total_profit") or 0) < 0 else VALUE_TEXT)
+                if item.get("total_profit") is not None
+                else SUBTEXT,
+            },
+        ]
+
     def _pct_cell(self, raw_value) -> ft.DataCell:
         return ft.DataCell(self._pct_text(raw_value))
 
@@ -2174,6 +2655,47 @@ class FletApp:
         sign = "+" if v > 0 else ""
         return ft.Text(
             f"{sign}{v:.2f}%",
+            color=color,
+            weight=ft.FontWeight.W_600,
+            font_family=FONT_MONO,
+            text_align=ft.TextAlign.CENTER,
+        )
+
+    def _number_text(self, raw_value, *, digits: int = 2, suffix: str = "") -> ft.Text:
+        if raw_value is None:
+            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
+
+        return ft.Text(
+            f"{value:.{digits}f}{suffix}",
+            color=VALUE_TEXT,
+            weight=ft.FontWeight.W_600,
+            font_family=FONT_MONO,
+            text_align=ft.TextAlign.CENTER,
+        )
+
+    def _money_text(self, raw_value, *, colorize: bool = False) -> ft.Text:
+        if raw_value is None:
+            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
+
+        if colorize:
+            color = UP if value > 0 else DOWN if value < 0 else VALUE_TEXT
+            text = f"+¥{value:.2f}" if value > 0 else f"-¥{abs(value):.2f}" if value < 0 else f"¥{value:.2f}"
+        else:
+            color = VALUE_TEXT
+            text = f"¥{value:.2f}"
+
+        return ft.Text(
+            text,
             color=color,
             weight=ft.FontWeight.W_600,
             font_family=FONT_MONO,
@@ -2291,10 +2813,22 @@ class FletApp:
         self.txt_price.value = "--"
         self.txt_change.value = ""
         self.txt_change.color = SUBTEXT
-
-        self._set_returns_table(None, None, None, None)
-        self._set_metric_spans(self.metric_left_1, "分位", "--")
-        self._set_ma_table("--", "--", "--", "--", "--", "--", "--", "--", SUBTEXT, SUBTEXT, SUBTEXT, SUBTEXT)
+        self._apply_metric_group(
+            self.detail_holding_tiles,
+            self._build_fund_detail_holding_metrics(
+                {"holding_units": None, "holding_cost_amount": None, "daily_profit": None, "total_profit": None}
+            ),
+        )
+        self._apply_metric_group(
+            self.detail_return_tiles,
+            self._build_fund_detail_return_metrics({"chg3": None, "chg7": None, "chg15": None, "chg30": None}),
+        )
+        self._apply_metric_group(
+            self.detail_ma_tiles,
+            self._build_fund_detail_ma_metrics(
+                {"percentile": None, "ma5": None, "ma10": None, "ma20": None, "ma250": None, "dist_ma5": None, "dist_ma10": None, "dist_ma20": None, "dist_ma250": None}
+            ),
+        )
 
         self.chart_img.visible = False
         self.chart_img.src = b""
@@ -2310,23 +2844,17 @@ class FletApp:
         self.txt_price.value = st.get("txt_price", "--")
         self.txt_change.value = st.get("txt_change", "")
         self.txt_change.color = st.get("txt_change_color", SUBTEXT)
-
-        self._set_returns_table(st.get("chg3_raw"), st.get("chg7_raw"), st.get("chg15_raw"), st.get("chg30_raw"))
-        self._set_metric_spans(self.metric_left_1, "分位", st.get("percentile", "--"))
-
-        self._set_ma_table(
-            st.get("ma5", "--"),
-            st.get("ma10", "--"),
-            st.get("ma20", "--"),
-            st.get("ma250", "--"),
-            st.get("dist_ma5", "--"),
-            st.get("dist_ma10", "--"),
-            st.get("dist_ma20", "--"),
-            st.get("dist_ma250", "--"),
-            st.get("dist_ma5_color", SUBTEXT),
-            st.get("dist_ma10_color", SUBTEXT),
-            st.get("dist_ma20_color", SUBTEXT),
-            st.get("dist_ma250_color", SUBTEXT),
+        self._apply_metric_group(
+            self.detail_holding_tiles,
+            self._build_fund_detail_holding_metrics(st.get("detail_holding_raw") or {}),
+        )
+        self._apply_metric_group(
+            self.detail_return_tiles,
+            self._build_fund_detail_return_metrics(st.get("detail_return_raw") or {}),
+        )
+        self._apply_metric_group(
+            self.detail_ma_tiles,
+            self._build_fund_detail_ma_metrics(st.get("detail_ma_raw") or {}),
         )
 
         png = st.get("chart_png")
@@ -2582,6 +3110,40 @@ class FletApp:
         if dist250_raw is not None:
             dist250_color = UP if float(dist250_raw) > 0 else DOWN if float(dist250_raw) < 0 else TEXT
 
+        holding_item = {"holding_units": None, "holding_cost_amount": None, "daily_profit": None, "total_profit": None}
+        if tgt.get("type") == "fund":
+            fund_cfg = self._get_fund_config_item(tgt.get("code"))
+            holding = fund_cfg.get("holding") if isinstance(fund_cfg, dict) else None
+            if isinstance(holding, dict):
+                holding_item["holding_units"] = holding.get("units")
+                holding_item["holding_cost_amount"] = holding.get("cost_amount")
+            holding_item.update(
+                calculate_holding_metrics(
+                    units=holding_item.get("holding_units"),
+                    cost_amount=holding_item.get("holding_cost_amount"),
+                    current_nav=res.get("current"),
+                    previous_nav=res.get("prev_close"),
+                )
+            )
+
+        detail_return_raw = {
+            "chg3": chg3_raw,
+            "chg7": chg7_raw,
+            "chg15": chg15_raw,
+            "chg30": chg30_raw,
+        }
+        detail_ma_raw = {
+            "percentile": res.get("percentile"),
+            "ma5": res.get("ma5"),
+            "ma10": res.get("ma10"),
+            "ma20": res.get("ma20"),
+            "ma250": res.get("ma250"),
+            "dist_ma5": dist5_raw,
+            "dist_ma10": dist10_raw,
+            "dist_ma20": dist20_raw,
+            "dist_ma250": dist250_raw,
+        }
+
         st = self._cache.setdefault(cache_key, {})
         st.update(
             {
@@ -2607,6 +3169,9 @@ class FletApp:
                 "dist_ma20_color": dist20_color,
                 "dist_ma250": dist250,
                 "dist_ma250_color": dist250_color,
+                "detail_holding_raw": holding_item,
+                "detail_return_raw": detail_return_raw,
+                "detail_ma_raw": detail_ma_raw,
                 "last_fetch_time": fetch_time,
             }
         )
@@ -2619,23 +3184,9 @@ class FletApp:
         self.txt_price.value = price_text
         self.txt_change.value = change_text
         self.txt_change.color = change_color
-
-        self._set_returns_table(chg3_raw, chg7_raw, chg15_raw, chg30_raw)
-        self._set_metric_spans(self.metric_left_1, "分位", pctile)
-        self._set_ma_table(
-            ma5,
-            ma10,
-            ma20,
-            ma250,
-            dist5,
-            dist10,
-            dist20,
-            dist250,
-            dist5_color,
-            dist10_color,
-            dist20_color,
-            dist250_color,
-        )
+        self._apply_metric_group(self.detail_holding_tiles, self._build_fund_detail_holding_metrics(holding_item))
+        self._apply_metric_group(self.detail_return_tiles, self._build_fund_detail_return_metrics(detail_return_raw))
+        self._apply_metric_group(self.detail_ma_tiles, self._build_fund_detail_ma_metrics(detail_ma_raw))
         self.page.update()
 
     def _start_chart_render(self, cache_key: str, tgt: dict):
