@@ -44,29 +44,18 @@ SURFACE_VARIANT = "#FAFAFA"  # Inner data grid / tiles
 
 FONT_SANS = "Segoe UI"
 FONT_MONO = "Consolas"
-MARKET_INDEX_NAMES = [
-    "上证指数",
-    "科创50",
-    "上证50",
-    "沪深300",
-    "深证成指",
-    "创业板指",
-    "中证500",
-    "中证1000",
-    "北证50",
+MARKET_INDEX_CONFIGS = [
+    {"code": "000001", "name": "上证指数", "category": "上证系列指数"},
+    {"code": "000688", "name": "科创50", "category": "上证系列指数"},
+    {"code": "000016", "name": "上证50", "category": "上证系列指数"},
+    {"code": "000300", "name": "沪深300", "category": "中证系列指数"},
+    {"code": "399001", "name": "深证成指", "category": "深证系列指数"},
+    {"code": "399006", "name": "创业板指", "category": "深证系列指数"},
+    {"code": "000905", "name": "中证500", "category": "中证系列指数"},
+    {"code": "000852", "name": "中证1000", "category": "中证系列指数"},
+    {"code": "899050", "name": "北证50", "category": "北证系列指数"},
 ]
-
-SINA_INDEX_SYMBOLS = {
-    "上证指数": "sh000001",
-    "科创50": "sh000688",
-    "上证50": "sh000016",
-    "沪深300": "sh000300",
-    "深证成指": "sz399001",
-    "创业板指": "sz399006",
-    "中证500": "sh000905",
-    "中证1000": "sh000852",
-    "北证50": "bj899050",
-}
+MARKET_INDEX_NAMES = [item["name"] for item in MARKET_INDEX_CONFIGS]
 
 
 MARKET_PAGE_SIZE = 50
@@ -78,8 +67,16 @@ FX_USDCNY = "USDCNY=X"
 STOOQ_MAP = {YF_GOLD: "xauusd"}
 HEADERS = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
 FUND_HEADERS = {"Referer": "http://fundf10.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
+EM_HEADERS = {"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
 REFRESH_MS = 300000  # 5分钟自动刷新
 COUNTDOWN_MS = 1000
+
+
+def build_market_placeholder_items() -> list[dict]:
+    return [
+        {"code": item["code"], "name": item["name"], "price": None, "chg": None, "pct": None}
+        for item in MARKET_INDEX_CONFIGS
+    ]
 
 
 def _log_dir() -> Path:
@@ -267,8 +264,8 @@ def fetch_shanghai_gold_sge(symbol: str = "Au(T+D)"):
         raise ValueError(f"SGE 行情解析失败: {exc}")
 
 
-def fetch_cn_indices(names: list[str] | None = None):
-    """Fetch common CN indices spot data via Akshare EM only."""
+def fetch_cn_indices(configs: list[dict] | None = None):
+    """Fetch common CN indices spot data from Eastmoney with code-first matching."""
 
     def _to_float(v):
         try:
@@ -276,212 +273,119 @@ def fetch_cn_indices(names: list[str] | None = None):
         except Exception:
             return None
 
-    def _norm_name(v: str) -> str:
-        return str(v or "").replace(" ", "").replace("　", "").strip()
+    def _request_json(url: str, params: dict, *, bypass_env_proxy: bool = False) -> dict:
+        request_kwargs = {"params": params, "headers": EM_HEADERS, "timeout": 8}
+        if bypass_env_proxy:
+            with _without_proxy_env():
+                session = requests.Session()
+                session.trust_env = False
+                resp = session.get(url, **request_kwargs)
+        else:
+            resp = requests.get(url, **request_kwargs)
+        resp.raise_for_status()
+        data_json = resp.json()
+        if not isinstance(data_json, dict):
+            raise ValueError("Eastmoney 返回格式异常")
+        return data_json
 
-    def _pick_row(df: pd.DataFrame, idx_name: str):
-        if df is None or df.empty or "名称" not in df.columns:
-            return None
+    def _candidate_secids(code: str, category: str) -> list[str]:
+        if category == "上证系列指数":
+            return [f"1.{code}", f"2.{code}"]
+        if category == "深证系列指数":
+            return [f"0.{code}", f"47.{code}"]
+        if category == "中证系列指数":
+            return [f"1.{code}", f"2.{code}", f"0.{code}"]
+        if category == "北证系列指数":
+            return [f"0.{code}", f"47.{code}", f"1.{code}"]
+        return [f"1.{code}", f"0.{code}", f"2.{code}", f"47.{code}"]
 
-        exact = df[df["名称"] == idx_name]
-        if not exact.empty:
-            return exact.iloc[0]
+    def _fetch_index_quote(config: dict) -> dict:
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        params_template = {
+            "fltt": "2",
+            "invt": "2",
+            "fields": "f43,f57,f58,f169,f170",
+        }
+        retry_delays = [0.5]
+        last_err = None
 
-        target = _norm_name(idx_name)
-        norm_series = df["名称"].astype(str).map(_norm_name)
-        exact_norm = df[norm_series == target]
-        if not exact_norm.empty:
-            return exact_norm.iloc[0]
+        for secid in _candidate_secids(config["code"], config["category"]):
+            params = {**params_template, "secid": secid}
 
-        for _, row in df.iterrows():
-            raw = row.get("名称")
-            n = _norm_name(raw)
-            if target and (target in n or n in target):
-                return row
-        return None
+            for attempt in range(1, len(retry_delays) + 2):
+                try:
+                    data_json = _request_json(url, params)
+                    data = data_json.get("data") or {}
+                    current = _to_float(data.get("f43"))
+                    name = str(data.get("f58") or "").strip()
+                    returned_code = str(data.get("f57") or "").strip()
+                    if current is None or returned_code != config["code"]:
+                        raise ValueError("返回代码或价格无效")
+                    return {
+                        "code": config["code"],
+                        "name": name or config["name"],
+                        "current": current,
+                        "change": _to_float(data.get("f169")),
+                        "pct": _to_float(data.get("f170")),
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "source": "Eastmoney",
+                    }
+                except Exception as exc:
+                    last_err = exc
+                    if attempt <= len(retry_delays):
+                        time_module.sleep(retry_delays[attempt - 1])
 
-    target_names = list(names or MARKET_INDEX_NAMES)
+            try:
+                data_json = _request_json(url, params, bypass_env_proxy=True)
+                data = data_json.get("data") or {}
+                current = _to_float(data.get("f43"))
+                name = str(data.get("f58") or "").strip()
+                returned_code = str(data.get("f57") or "").strip()
+                if current is None or returned_code != config["code"]:
+                    raise ValueError("返回代码或价格无效")
+                return {
+                    "code": config["code"],
+                    "name": name or config["name"],
+                    "current": current,
+                    "change": _to_float(data.get("f169")),
+                    "pct": _to_float(data.get("f170")),
+                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "source": "Eastmoney",
+                }
+            except Exception as exc:
+                last_err = exc
+
+        raise ValueError(f"{config['name']}({config['code']}) 抓取失败: {last_err}")
+
+    target_configs = [
+        {
+            "code": str(item.get("code") or "").strip(),
+            "name": str(item.get("name") or "").strip(),
+            "category": str(item.get("category") or "").strip(),
+        }
+        for item in (configs or MARKET_INDEX_CONFIGS)
+        if str(item.get("code") or "").strip() and str(item.get("name") or "").strip()
+    ]
     collected: dict[str, dict] = {}
     errors: list[str] = []
-    cat_errors: list[str] = []
 
-    # Primary source: Eastmoney categories
-    try:
-        cats = ["上证系列指数", "深证系列指数", "中证系列指数"]
-        frames: list[pd.DataFrame] = []
-        retry_delays = [1.0]
-        max_attempts = len(retry_delays) + 1
-
-        for c in cats:
-            last_err = None
-            saw_proxy_err = False
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    df = ak.stock_zh_index_spot_em(symbol=c)
-                    if df is None or df.empty:
-                        last_err = ValueError("返回空数据")
-                    else:
-                        frames.append(df)
-                        last_err = None
-                        break
-                except Exception as exc:
-                    last_err = exc
-                    if "proxy" in str(exc).lower():
-                        saw_proxy_err = True
-
-                if attempt < max_attempts:
-                    time_module.sleep(retry_delays[attempt - 1])
-
-            if last_err is not None and saw_proxy_err:
-                try:
-                    with _without_proxy_env():
-                        df = ak.stock_zh_index_spot_em(symbol=c)
-                    if df is None or df.empty:
-                        last_err = ValueError("无代理重试返回空数据")
-                    else:
-                        frames.append(df)
-                        last_err = None
-                except Exception as exc:
-                    last_err = exc
-
-            if last_err is not None:
-                cat_errors.append(f"{c}:{last_err}")
-
-        if frames:
-            em_df = pd.concat(frames, ignore_index=True)
-            if "名称" in em_df.columns:
-                for name in target_names:
-                    row = _pick_row(em_df, name)
-                    if row is None:
-                        continue
-                    collected[name] = {
-                        "name": name,
-                        "current": _to_float(row.get("最新价")),
-                        "change": _to_float(row.get("涨跌额")),
-                        "pct": _to_float(row.get("涨跌幅")),
-                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "source": "Akshare(EM)",
-                    }
-            else:
-                errors.append("EM字段缺失")
-        else:
-            errors.append("EM无可用数据")
-
-        if cat_errors:
-            LOGGER.warning("EM分类请求异常: %s", " | ".join(cat_errors))
-    except Exception as exc:
-        errors.append(f"EM异常: {exc}")
-
-    # Supplemental: targeted Sina fetch for indices not covered by EM (e.g. 北证50)
-    em_missing = [n for n in target_names if n not in collected]
-    if em_missing:
+    for config in target_configs:
         try:
-            sina_rows = fetch_cn_indices_sina(em_missing)
-            for row in sina_rows:
-                name = row.get("name") or ""
-                if name and name not in collected:
-                    collected[name] = row
+            collected[config["code"]] = _fetch_index_quote(config)
         except Exception as exc:
-            LOGGER.warning("补充Sina指数失败 (%s): %s", em_missing, exc)
+            errors.append(str(exc))
+            LOGGER.warning("大盘指数抓取失败: %s", exc)
 
     if not collected:
-        detail_parts = errors[:]
-        if cat_errors:
-            detail_parts.append("分类失败=" + " ; ".join(cat_errors[:3]))
-            if len(cat_errors) > 3:
-                detail_parts.append(f"其余{len(cat_errors) - 3}项省略")
-        raise ValueError("指数行情获取失败: " + " | ".join(detail_parts))
+        raise ValueError("指数行情获取失败: " + " | ".join(errors[:3]))
 
     res: list[dict] = []
-    for name in target_names:
-        if name in collected:
-            res.append(collected[name])
+    for config in target_configs:
+        row = collected.get(config["code"])
+        if row:
+            res.append(row)
 
     return res
-
-
-def fetch_cn_indices_sina(names: list[str] | None = None):
-    """Fallback source for CN indices via Sina quote API."""
-
-    def _to_float(v):
-        try:
-            return float(v)
-        except Exception:
-            return None
-
-    target_names = list(names or MARKET_INDEX_NAMES)
-    code_map = {name: SINA_INDEX_SYMBOLS.get(name) for name in target_names}
-    symbols = [sym for sym in code_map.values() if sym]
-    if not symbols:
-        return []
-
-    url = f"http://hq.sinajs.cn/list={','.join(symbols)}"
-    resp = requests.get(url, headers=HEADERS, timeout=6)
-    if resp.status_code != 200:
-        raise ValueError(f"Sina状态异常: {resp.status_code}")
-
-    resp.encoding = "gbk"
-    text = resp.text or ""
-    if "hq_str_" not in text:
-        raise ValueError("Sina返回为空")
-
-    rows: list[dict] = []
-    by_symbol = {v: k for k, v in code_map.items() if v}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line.startswith("var hq_str_") or "=" not in line:
-            continue
-
-        prefix, payload = line.split("=", 1)
-        symbol = prefix.replace("var hq_str_", "").strip()
-        payload = payload.strip()
-        if payload.endswith(";"):
-            payload = payload[:-1]
-        payload = payload.strip().strip('"')
-        if not payload:
-            continue
-
-        parts = payload.split(",")
-        if len(parts) < 4:
-            continue
-
-        display_name = by_symbol.get(symbol) or parts[0] or symbol
-        prev_close = _to_float(parts[2])
-        current = _to_float(parts[3])
-        if current is None:
-            current = _to_float(parts[1])
-
-        if current is None:
-            continue
-
-        change = None
-        pct = None
-        if prev_close not in (None, 0):
-            change = current - prev_close
-            pct = change / prev_close * 100
-
-        ts = ""
-        if len(parts) >= 2 and parts[-1]:
-            if len(parts) >= 3 and parts[-2]:
-                ts = f"{parts[-2]} {parts[-1]}".strip()
-            else:
-                ts = str(parts[-1]).strip()
-
-        rows.append(
-            {
-                "name": display_name,
-                "current": current,
-                "change": change,
-                "pct": pct,
-                "ts": ts or datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "source": "Sina",
-            }
-        )
-
-    if not rows:
-        raise ValueError("Sina无可用数据")
-
-    return rows
 
 
 def fetch_fund(code: str):
@@ -1476,7 +1380,7 @@ class FletApp:
         )
 
         # Seed cache and show placeholders immediately (never blank while loading)
-        self._market_cache["items"] = [{"name": n, "price": None, "chg": None, "pct": None} for n in list(MARKET_INDEX_NAMES)]
+        self._market_cache["items"] = build_market_placeholder_items()
         self._market_cache["last_fetch_time"] = ""
         self._market_cache["last_fetch_dt"] = None
         self._market_cache["error"] = None
@@ -1933,9 +1837,9 @@ class FletApp:
             return
 
         self._market_refreshing = True
-        names = list(MARKET_INDEX_NAMES)
+        configs = list(MARKET_INDEX_CONFIGS)
         cached_items = self._market_cache.get("items") or []
-        placeholders = [{"name": n, "price": None, "chg": None, "pct": None} for n in names]
+        placeholders = build_market_placeholder_items()
         show_items = cached_items if cached_items else placeholders
         show_fetch_time = self._market_cache.get("last_fetch_time") or ""
         self._market_cache["error"] = None
@@ -1949,19 +1853,20 @@ class FletApp:
 
             err = None
             try:
-                fetched = fetch_cn_indices(names)
-                fetched_map = {str(it.get("name") or ""): it for it in (fetched or [])}
+                fetched = fetch_cn_indices(configs)
+                fetched_map = {str(it.get("code") or "").strip(): it for it in (fetched or [])}
 
                 items: list[dict] = []
-                for n in names:
-                    row = fetched_map.get(n)
+                for config in configs:
+                    row = fetched_map.get(config["code"])
                     if not row:
-                        items.append({"name": n, "price": None, "chg": None, "pct": None})
+                        items.append({"code": config["code"], "name": config["name"], "price": None, "chg": None, "pct": None})
                         continue
 
                     items.append(
                         {
-                            "name": n,
+                            "code": config["code"],
+                            "name": config["name"],
                             "price": row.get("current"),
                             "chg": row.get("change"),
                             "pct": row.get("pct"),
