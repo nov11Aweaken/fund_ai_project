@@ -1397,7 +1397,7 @@ class FletApp:
 
         self.market_list = ft.ListView(
             expand=True,
-            spacing=10,
+            spacing=6,
             padding=0,
             auto_scroll=False,
             scroll=ft.ScrollMode.AUTO,
@@ -1415,13 +1415,13 @@ class FletApp:
 
         market_top_bar = ft.Row(
             [
-                ft.Column(
-                    [
-                        ft.Text("大盘行情", size=20, weight=ft.FontWeight.W_700, color=TEXT),
-                        ft.Text("用卡片概览快速查看指数涨跌与波动。", color=SUBTEXT, size=12),
-                    ],
-                    spacing=4,
-                    expand=True,
+                        ft.Column(
+                            [
+                                ft.Text("大盘行情", size=20, weight=ft.FontWeight.W_700, color=TEXT),
+                                ft.Text("高密度查看指数最新价、涨跌与涨跌幅。", color=SUBTEXT, size=12),
+                            ],
+                            spacing=4,
+                            expand=True,
                 ),
                 ft.Row([self.prg_market_loading, self.txt_market_time, self.btn_market_refresh], spacing=8),
             ],
@@ -1458,10 +1458,10 @@ class FletApp:
                     ft.Container(height=1, bgcolor="#14000000"),
                     market_pager_bar,
                 ],
-                spacing=12,
+                spacing=10,
                 expand=True,
             ),
-            padding=12,
+            padding=10,
             bgcolor=SURFACE,
             border_radius=20,
             border=ft.Border.all(1, "#14000000"),
@@ -2229,37 +2229,49 @@ class FletApp:
                 return SUBTEXT
             return UP if fv > 0 else DOWN if fv < 0 else VALUE_TEXT
 
+        def dense_metric_cell(metric: dict, *, width: int = 110) -> ft.Container:
+            return ft.Container(
+                width=width,
+                content=ft.Column(
+                    [
+                        ft.Text(metric["label"], color=SUBTEXT, size=10),
+                        ft.Text(
+                            metric["value"],
+                            color=metric["color"],
+                            size=15,
+                            weight=ft.FontWeight.W_700,
+                            font_family=FONT_MONO,
+                            no_wrap=True,
+                        ),
+                    ],
+                    spacing=2,
+                    horizontal_alignment=ft.CrossAxisAlignment.START,
+                ),
+            )
+
         rows: list[ft.Control] = []
         for it in page_items:
-            card_data = self._build_market_overview_card_data(it)
-            metric_controls: list[ft.Control] = []
-            for metric in card_data["metrics"]:
-                metric_controls.append(
+            row_data = self._build_market_dense_row_data(it)
+            row = ft.Row(
+                [
                     ft.Container(
                         expand=True,
-                        padding=12,
-                        bgcolor="#F8FAFC",
-                        border_radius=16,
-                        border=ft.Border.all(1, "#120F172A"),
                         content=ft.Column(
                             [
-                                ft.Text(metric["label"], color=SUBTEXT, size=11),
-                                ft.Text(metric["value"], color=metric["color"], size=16, weight=ft.FontWeight.W_700, font_family=FONT_MONO),
+                                ft.Text(row_data["title"], color=TEXT, size=15, weight=ft.FontWeight.W_700, no_wrap=True),
+                                ft.Text(row_data["code"], color=SUBTEXT, size=11),
                             ],
-                            spacing=6,
+                            spacing=2,
                         ),
-                    )
-                )
-
-            card = ft.Column(
-                [
-                    ft.Text(card_data["title"], color=TEXT, size=17, weight=ft.FontWeight.W_700),
-                    ft.Text(card_data["subtitle"], color=SUBTEXT, size=12),
-                    ft.Row(metric_controls, spacing=10),
+                    ),
+                    dense_metric_cell(row_data["price"], width=112),
+                    dense_metric_cell(row_data["change"], width=96),
+                    dense_metric_cell(row_data["pct"], width=96),
                 ],
-                spacing=12,
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
-            rows.append(self._module_card(card, padding=16))
+            rows.append(self._module_card(row, padding=12))
 
         if not rows:
             rows = [self._module_card(ft.Text("暂无数据", color=SUBTEXT), padding=12)]
@@ -2596,6 +2608,19 @@ class FletApp:
                 {"label": "涨跌", "value": FletApp._format_number_value(self, item.get("chg")), "color": FletApp._metric_color(self, item.get("chg"))},
                 {"label": "涨跌幅", "value": FletApp._format_pct_value(self, item.get("pct")), "color": FletApp._metric_color(self, item.get("pct"))},
             ],
+        }
+
+    def _build_market_dense_row_data(self, item: dict) -> dict:
+        card = self._build_market_overview_card_data(item)
+        subtitle = str(card.get("subtitle") or "")
+        code = subtitle.replace("代码 ", "", 1) if subtitle.startswith("代码 ") else subtitle
+        metrics = card.get("metrics") or []
+        return {
+            "title": card.get("title", "--"),
+            "code": code or "--",
+            "price": metrics[0] if len(metrics) > 0 else {"label": "最新价", "value": "--", "color": SUBTEXT},
+            "change": metrics[1] if len(metrics) > 1 else {"label": "涨跌", "value": "--", "color": SUBTEXT},
+            "pct": metrics[2] if len(metrics) > 2 else {"label": "涨跌幅", "value": "--", "color": SUBTEXT},
         }
 
     def _build_fund_detail_holding_metrics(self, item: dict) -> list[dict]:
