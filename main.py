@@ -962,7 +962,7 @@ class FletApp:
             options=[ft.dropdown.Option(key=t["code"], text=t["label"]) for t in self.targets],
             value=default_target["code"],
             on_select=self.on_target_change,
-            width=440
+            expand=True,
         )
         self.btn_refresh = ft.IconButton(
             ft.Icons.REFRESH,
@@ -996,13 +996,14 @@ class FletApp:
         self.txt_price = ft.Text("--", size=44, weight=ft.FontWeight.BOLD, color=VALUE_TEXT, font_family=FONT_MONO)
         self.txt_change = ft.Text("", size=18, weight=ft.FontWeight.W_600, color=SUBTEXT, font_family=FONT_MONO)
 
-        self.btn_edit_detail_holding = ft.TextButton(
-            "编辑持仓",
+        self.btn_detail_holding_action = ft.IconButton(
+            ft.Icons.ADD_CARD,
             on_click=self.open_current_target_holding_dialog,
+            icon_color=ACCENT,
+            tooltip="录入持仓",
             style=ft.ButtonStyle(
-                padding=ft.Padding(14, 10, 14, 10),
-                shape=ft.RoundedRectangleBorder(radius=999),
-                color={ft.ControlState.DEFAULT: ACCENT},
+                padding=ft.Padding(10, 10, 10, 10),
+                shape=ft.RoundedRectangleBorder(radius=12),
                 bgcolor={ft.ControlState.DEFAULT: "#102196F3"},
                 overlay_color={ft.ControlState.HOVERED: "#162196F3"},
             ),
@@ -1162,41 +1163,72 @@ class FletApp:
 
         top_row = ft.Row(
             [
-                self.dd_target,
-                ft.Row([self.btn_refresh, self.btn_edit_detail_holding], spacing=10),
+                ft.Container(content=self.dd_target, expand=True),
+                ft.Row([self.btn_refresh, self.btn_detail_holding_action], spacing=8),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        holding_section = ft.Column(
-            [
-                ft.Text("持仓概览", color=TEXT, size=14, weight=ft.FontWeight.W_600),
-                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_holding_tiles]),
-            ],
-            spacing=10,
+        def detail_section_card(title: str, subtitle: str, tiles: list[dict]):
+            return module_card(
+                ft.Column(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                                ft.Text(subtitle, color=SUBTEXT, size=12),
+                            ],
+                            spacing=4,
+                        ),
+                        self._build_metric_wrap_row([tile["wrapper"] for tile in tiles]),
+                    ],
+                    spacing=12,
+                ),
+                padding=14,
+            )
+
+        holding_section = detail_section_card(
+            "持仓概览",
+            "录入持仓后自动计算市值、当日盈亏与累计盈亏。",
+            self.detail_holding_tiles,
+        )
+        returns_section = detail_section_card(
+            "收益区间",
+            "聚焦短中期收益表现，便于快速判断趋势强弱。",
+            self.detail_return_tiles,
+        )
+        ma_section = detail_section_card(
+            "均线与位置",
+            "查看估值分位与偏离均线位置，辅助判断所处区间。",
+            self.detail_ma_tiles,
         )
 
-        returns_section = ft.Column(
-            [
-                ft.Text("收益区间", color=TEXT, size=14, weight=ft.FontWeight.W_600),
-                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_return_tiles]),
-            ],
-            spacing=10,
+        detail_metrics_column = ft.Column(
+            [holding_section, returns_section, ma_section],
+            spacing=14,
+            expand=True,
         )
 
-        ma_section = ft.Column(
+        detail_workspace = ft.ResponsiveRow(
             [
-                ft.Text("均线与位置", color=TEXT, size=14, weight=ft.FontWeight.W_600),
-                self._build_metric_wrap_row([tile["wrapper"] for tile in self.detail_ma_tiles]),
+                ft.Container(
+                    col={"xs": 12, "xl": 5},
+                    content=detail_metrics_column,
+                ),
+                ft.Container(
+                    col={"xs": 12, "xl": 7},
+                    content=self.chart_card,
+                ),
             ],
-            spacing=10,
+            spacing=14,
+            run_spacing=14,
         )
 
         self.info_card = ft.Container(
             content=ft.Column(
-                [top_row, header_price_card, holding_section, returns_section, ma_section, self.chart_card],
+                [top_row, header_price_card, detail_workspace],
                 spacing=14,
-                expand=True,
             ),
             padding=16,
             bgcolor=SURFACE,
@@ -1208,15 +1240,12 @@ class FletApp:
                 color="#22000000",
                 offset=ft.Offset(0, 8),
             ),
-            expand=True,
         )
 
-        self.fund_panel = ft.Column(
-            [self.info_card],
-            spacing=16,
-            expand=True,
-            visible=False,
-        )
+        self._refresh_detail_holding_action()
+
+        self.fund_panel = self._build_fund_detail_panel(self.info_card)
+        self.fund_panel.visible = False
 
         # === Fund list view ===
         self.txt_fund_list_title = ft.Text("基金概览", color=TEXT, size=20, weight=ft.FontWeight.W_700)
@@ -1546,6 +1575,7 @@ class FletApp:
             self._show_message("暂无基金，请先添加")
             self._set_tab_selected("fund_list")
             return
+        self._refresh_detail_holding_action()
         self._set_tab_selected("fund")
         self.manual_refresh()
 
@@ -1814,6 +1844,7 @@ class FletApp:
         else:
             self.dd_target.value = None
 
+        self._refresh_detail_holding_action()
         self._close_dialog()
         self._hydrate_fund_names_async()
         self.refresh_fund_list()
@@ -1976,6 +2007,7 @@ class FletApp:
         elif self.active_tab == "fund_list":
             self.refresh_fund_list()
         if self.active_tab == "fund" and normalize_fund_code(self.current_target_data().get("code")) == code:
+            self._refresh_detail_holding_action()
             self.manual_refresh()
         self._show_message("持仓已保存")
 
@@ -2020,6 +2052,7 @@ class FletApp:
         else:
             self.dd_target.value = None
 
+        self._refresh_detail_holding_action()
         cached_items = self._fund_list_cache.get("items") or []
         local_items = [it for it in cached_items if str(it.get("code") or "").strip() != code]
         fetch_time = datetime.now().strftime("%H:%M:%S")
@@ -2351,98 +2384,89 @@ class FletApp:
         for it in render_items:
             name = (it.get("name") or "").strip() or it.get("code")
             code = it.get("code")
-            title = f"{name} ({code})" if code else name
-            holding_action_label = "编辑持仓" if it.get("holding_units") is not None else "录入持仓"
-
+            # Compact display: Name on top, Code below or same line?
+            # Option 2 (Single Row Style): Left (Name/Code) ... Right (Val/Nav) ... Actions
+            
             name_color = TEXT if not it.get("error") else SUBTEXT
-            has_holding = it.get("holding_units") is not None
             metrics = self._build_fund_overview_metrics(it, prev_nav_label)
 
-            tags = ft.Row(
+            # Extract metrics
+            market_metric = metrics[0] if metrics else {"primary": "--", "secondary": "--", "color": SUBTEXT}
+            est_val = market_metric["primary"]
+            est_color = market_metric["color"]
+            prev_nav_text = market_metric["secondary"]
+
+            # Left Column: Name + Code
+            left_col = ft.Column(
                 [
-                    ft.Container(
-                        content=ft.Text("估值中" if it.get("est_pct") is not None else "待刷新", size=11, color=ACCENT),
-                        padding=ft.Padding(8, 4, 8, 4),
-                        bgcolor="#102196F3",
-                        border_radius=999,
-                    ),
-                    ft.Container(
-                        content=ft.Text("有持仓" if has_holding else "未录入持仓", size=11, color=(TEXT if has_holding else SUBTEXT)),
-                        padding=ft.Padding(8, 4, 8, 4),
-                        bgcolor="#0D111827",
-                        border_radius=999,
+                    ft.Text(name, color=name_color, size=14, weight=ft.FontWeight.W_600, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Row(
+                        [
+                            ft.Container(
+                                content=ft.Text("估" if it.get("est_pct") is not None else "待", size=9, color=ACCENT),
+                                padding=ft.Padding(3, 1, 3, 1),
+                                bgcolor="#102196F3",
+                                border_radius=3,
+                            ),
+                            ft.Text(code, color=SUBTEXT, size=11),
+                        ],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 ],
-                spacing=8,
+                spacing=2,
+                expand=True,
             )
 
-            actions = (
-                ft.Row(
-                    [
-                        ft.TextButton(
-                            "详情",
-                            on_click=(lambda e, c=code: self.open_fund_detail(c)),
-                            style=ft.ButtonStyle(
-                                padding=ft.Padding(12, 8, 12, 8),
-                                shape=ft.RoundedRectangleBorder(radius=999),
-                                color={ft.ControlState.DEFAULT: ACCENT},
-                                overlay_color={ft.ControlState.HOVERED: "#142196F3"},
-                            ),
-                        ),
-                        ft.TextButton(
-                            holding_action_label,
-                            on_click=(lambda e, c=code, n=name: self.open_holding_dialog(c, n)),
-                            style=ft.ButtonStyle(
-                                padding=ft.Padding(12, 8, 12, 8),
-                                shape=ft.RoundedRectangleBorder(radius=999),
-                                color={ft.ControlState.DEFAULT: ACCENT},
-                                bgcolor={ft.ControlState.DEFAULT: "#102196F3"},
-                                overlay_color={ft.ControlState.HOVERED: "#162196F3"},
-                            ),
-                        ),
-                        ft.IconButton(
-                            ft.Icons.DELETE_OUTLINE,
-                            on_click=(lambda e, c=code, n=name: self.open_delete_fund_confirm_dialog(c, n)),
-                            icon_color=DOWN,
-                            tooltip="删除基金",
-                        ),
-                    ],
-                    spacing=6,
-                )
-                if code
-                else ft.Text("", color=SUBTEXT)
-            )
-
-            metric_controls = []
-            for metric in metrics:
-                metric_controls.append(
-                    ft.Container(
-                        expand=True,
-                        padding=12,
-                        bgcolor="#F8FAFC",
-                        border_radius=16,
-                        border=ft.Border.all(1, "#120F172A"),
-                        content=ft.Column(
-                            [
-                                ft.Text(metric["label"], color=SUBTEXT, size=11),
-                                ft.Text(metric["primary"], color=metric["color"], size=16, weight=ft.FontWeight.W_700, font_family=FONT_MONO),
-                                ft.Text(metric["secondary"], color=SUBTEXT, size=11, no_wrap=True),
-                            ],
-                            spacing=6,
-                        ),
-                    )
-                )
-
-            card = ft.Column(
+            # Center/Right Column: Valuation + Prev Nav (Right aligned)
+            data_col = ft.Column(
                 [
-                    ft.Text(title, color=name_color, size=17, weight=ft.FontWeight.W_700, no_wrap=True),
-                    tags,
-                    actions,
-                    ft.Row(metric_controls, spacing=10),
+                    ft.Text(est_val, color=est_color, size=15, weight=ft.FontWeight.W_700, font_family=FONT_MONO, text_align=ft.TextAlign.RIGHT),
+                    ft.Text(prev_nav_text, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
                 ],
-                spacing=12,
+                spacing=2,
+                horizontal_alignment=ft.CrossAxisAlignment.END,
             )
-            cards.append(self._module_card(card, padding=16))
+
+            # Actions Row
+            actions_row = ft.Row(
+                [
+                    ft.IconButton(
+                        ft.Icons.INFO_OUTLINE,
+                        tooltip="详情",
+                        icon_size=18,
+                        on_click=(lambda e, c=code: self.open_fund_detail(c)),
+                        icon_color=ACCENT,
+                    ),
+                    ft.IconButton(
+                        ft.Icons.DELETE_OUTLINE,
+                        tooltip="删除",
+                        icon_size=18,
+                        on_click=(lambda e, c=code, n=name: self.open_delete_fund_confirm_dialog(c, n)),
+                        icon_color=DOWN,
+                    ),
+                ],
+                spacing=0,
+            )
+
+            # Main Row
+            main_row = ft.Row(
+                [
+                    left_col,
+                    ft.Row(
+                        [
+                            data_col,
+                            actions_row,
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+            cards.append(self._module_card(main_row, padding=10))
 
         self.fund_list_list.controls = cards
         self.page.update()
@@ -2462,25 +2486,58 @@ class FletApp:
             ft.TextSpan(value, style=ft.TextStyle(color=value_color, weight=ft.FontWeight.W_600)),
         ]
 
-    def _create_metric_tile(self, label: str, *, width: int = 220) -> dict:
+    def _detail_holding_action_config(self, code: str | None) -> dict:
+        normalized_code = normalize_fund_code(code)
+        fund_item = self._get_fund_config_item(normalized_code) if normalized_code else {}
+        holding = fund_item.get("holding") if isinstance(fund_item, dict) else None
+        has_holding = isinstance(holding, dict) and (
+            holding.get("units") is not None or holding.get("cost_amount") is not None
+        )
+        return {
+            "icon": ft.Icons.EDIT_NOTE if has_holding else ft.Icons.ADD_CARD,
+            "tooltip": "编辑持仓" if has_holding else "录入持仓",
+            "bgcolor": "#102196F3" if has_holding else "#0F2196F3",
+        }
+
+    def _refresh_detail_holding_action(self):
+        button = getattr(self, "btn_detail_holding_action", None)
+        if button is None:
+            return
+        config = self._detail_holding_action_config(self.current_target_data().get("code"))
+        button.icon = config["icon"]
+        button.tooltip = config["tooltip"]
+        button.style = ft.ButtonStyle(
+            padding=ft.Padding(10, 10, 10, 10),
+            shape=ft.RoundedRectangleBorder(radius=12),
+            bgcolor={ft.ControlState.DEFAULT: config["bgcolor"]},
+            overlay_color={ft.ControlState.HOVERED: "#162196F3"},
+        )
+
+    def _create_metric_tile(self, label: str, *, col: dict | None = None) -> dict:
         label_text = ft.Text(label, color=SUBTEXT, size=11)
         value_text = ft.Text("--", color=VALUE_TEXT, size=17, weight=ft.FontWeight.W_700, font_family=FONT_MONO)
         subtitle_text = ft.Text("", color=SUBTEXT, size=11)
         card = self._module_card(ft.Column([label_text, value_text, subtitle_text], spacing=6), padding=12)
         return {
-            "wrapper": ft.Container(width=width, content=card),
+            "wrapper": ft.Container(col=col or {"xs": 12, "sm": 6, "xl": 3}, content=card),
             "label": label_text,
             "value": value_text,
             "subtitle": subtitle_text,
         }
 
-    def _build_metric_wrap_row(self, controls: list[ft.Control]) -> ft.Row:
-        return ft.Row(
+    def _build_metric_wrap_row(self, controls: list[ft.Control]) -> ft.ResponsiveRow:
+        return ft.ResponsiveRow(
             controls,
             spacing=12,
-            wrap=True,
             run_spacing=12,
-            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+
+    def _build_fund_detail_panel(self, content: ft.Control) -> ft.Column:
+        return ft.Column(
+            [content],
+            spacing=16,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
 
     def _apply_metric_tile(self, tile: dict, *, label: str, value: str, subtitle: str = "", color: str = VALUE_TEXT):
@@ -2840,6 +2897,7 @@ class FletApp:
         return str(tgt.get("key") or tgt.get("code") or "")
 
     def _clear_view_state(self):
+        self._refresh_detail_holding_action()
         self.txt_header_title.value = self.current_target_data().get("label", "")
         self.txt_header_time.value = ""
         self.txt_price.value = "--"
@@ -2871,6 +2929,7 @@ class FletApp:
         if not st:
             return
 
+        self._refresh_detail_holding_action()
         self.txt_header_title.value = st.get("txt_title", self.current_target_data().get("label", ""))
         self.txt_header_time.value = st.get("txt_header_time", "")
         self.txt_price.value = st.get("txt_price", "--")
@@ -3211,6 +3270,7 @@ class FletApp:
         if cache_key != self._cache_key(self.current_target_data()):
             return
 
+        self._refresh_detail_holding_action()
         self.txt_header_title.value = tgt.get("label", "")
         self.txt_header_time.value = header_time
         self.txt_price.value = price_text
