@@ -929,7 +929,7 @@ def get_chart_html(code: str, name: str = "", chart_type="fund", symbol_data=Non
 class FletApp:
     def __init__(self, page: ft.Page):
         self.page = page
-        self.page.title = "基你太美 V 0.2 by Aweaken"
+        self.page.title = "基你太美 V 1.0.0 by Aweaken"
         self.page.bgcolor = BG
         self.page.padding = 20
         self.page.theme = ft.Theme(font_family=FONT_SANS)
@@ -2398,7 +2398,7 @@ class FletApp:
             code = it.get("code")
             # Compact display: Name on top, Code below or same line?
             # Option 2 (Single Row Style): Left (Name/Code) ... Right (Val/Nav) ... Actions
-            
+
             name_color = TEXT if not it.get("error") else SUBTEXT
             metrics = self._build_fund_overview_metrics(it, prev_nav_label)
 
