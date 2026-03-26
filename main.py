@@ -1700,11 +1700,19 @@ class FletApp:
             on_submit=self.on_add_fund_input_submit,
             width=260,
         )
-        self._add_fund_query_btn = ft.Button("查询", on_click=self.on_add_fund_input_submit)
+        self._add_fund_input_hint = ft.Text("", color=SUBTEXT, size=12)
+        self._add_fund_query_btn = ft.Button("确定", on_click=self.on_add_fund_input_submit)
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("添加基金"),
-            content=self._add_fund_input_field,
+            content=ft.Column(
+                [
+                    self._add_fund_input_field,
+                    self._add_fund_input_hint,
+                ],
+                tight=True,
+                spacing=6,
+            ),
             actions=[
                 ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
                 self._add_fund_query_btn,
@@ -1715,17 +1723,41 @@ class FletApp:
 
     def on_add_fund_input_submit(self, e=None):
         field = getattr(self, "_add_fund_input_field", None)
-        code = normalize_fund_code(field.value if field else "")
+        hint = getattr(self, "_add_fund_input_hint", None)
+        query_btn = getattr(self, "_add_fund_query_btn", None)
+
+        raw_code = ""
+        if e is not None and getattr(e, "data", None):
+            raw_code = e.data
+        elif field is not None:
+            raw_code = field.value or ""
+        code = normalize_fund_code(raw_code)
         if not code:
+            if hint is not None:
+                hint.value = "请输入基金代码"
             self._show_message("请输入基金代码")
+            self.page.update()
             return
+
+        if hint is not None:
+            hint.value = "查询中，请稍候..."
+        if query_btn is not None:
+            query_btn.disabled = True
+        self.page.update()
 
         try:
             preview = preview_fund_candidate(code, fetch_fund_estimate)
         except ValueError as exc:
+            if hint is not None:
+                hint.value = f"查询失败：{exc}"
+            if query_btn is not None:
+                query_btn.disabled = False
+            self.page.update()
             self._show_message(f"查询失败：{exc}")
             return
 
+        if query_btn is not None:
+            query_btn.disabled = False
         self._close_dialog()
         self._open_add_fund_preview_dialog(preview)
 
