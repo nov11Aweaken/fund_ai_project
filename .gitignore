@@ -15,3 +15,18 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Python egg
+*.egg-info/
+*.egg
+
+# 调试/性能分析产物
+importtime.txt
+
+# 日志文件
+*.log
+
+# 环境变量文件（预防性排除）
+.env
+.env.*

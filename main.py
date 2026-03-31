@@ -5,28 +5,20 @@ import os
 import sys
 import logging
 import tempfile
-import base64
 import io
 import time as time_module
 from contextlib import contextmanager
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import ttk
-
 import flet as ft
-try:
-    from flet_webview import WebView
-except Exception:
-    WebView = None
 import akshare as ak
 import pandas as pd
 import requests
 import pyecharts.options as opts
-from pyecharts.charts import Line, Kline
+from pyecharts.charts import Line
 
 import matplotlib
 matplotlib.use("Agg")
-import mplfinance as mpf
 import matplotlib.pyplot as plt
 
 from funds_manager import (
@@ -63,21 +55,15 @@ MARKET_INDEX_CONFIGS = [
     {"code": "000852", "name": "中证1000", "category": "中证系列指数"},
     {"code": "899050", "name": "北证50", "category": "北证系列指数"},
 ]
-MARKET_INDEX_NAMES = [item["name"] for item in MARKET_INDEX_CONFIGS]
 
 
 MARKET_PAGE_SIZE = 50
 MARKET_MIN_REFRESH_SECONDS = 120
 
 
-YF_GOLD = "XAUUSD=X"
-FX_USDCNY = "USDCNY=X"
-STOOQ_MAP = {YF_GOLD: "xauusd"}
 HEADERS = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
-FUND_HEADERS = {"Referer": "http://fundf10.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
 EM_HEADERS = {"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
 REFRESH_MS = 300000  # 5分钟自动刷新
-COUNTDOWN_MS = 1000
 
 
 def build_market_placeholder_items() -> list[dict]:
@@ -165,12 +151,6 @@ def _config_path() -> Path:
 # - {"funds": ["110022", "161725", ...]}
 DEFAULT_FUND_CONFIG = {"funds": [{"code": "110022"}]}
 
-KLINE_PRESETS = {
-    "日K": {"range": "1mo", "interval": "1d"},
-    "近半年": {"range": "6mo", "interval": "1d"},
-    "月K": {"range": "2y", "interval": "1mo"},
-}
-
 
 
 def load_fund_config():
@@ -186,73 +166,6 @@ def load_fund_config():
     except Exception as exc:
         LOGGER.exception("加载基金配置失败，使用默认配置")
         return DEFAULT_FUND_CONFIG["funds"]
-
-
-def fetch_gold(source: str = "sina"):
-    try:
-        df = ak.futures_foreign_commodity_realtime(symbol=['XAU'])
-        if df is None or df.empty:
-             raise ValueError("返回数据为空")
-
-        row = df.iloc[0]
-        # akshare futures_foreign_commodity_realtime columns mapping:
-        # Based on manual inspection: 1:Latest, 3:Change, 4:Pct, 8:PrevClose, 12:Time, 13:Date
-        current = float(row.iloc[1])
-        change = float(row.iloc[3])
-        pct = float(row.iloc[4])
-        prev_close = float(row.iloc[8])
-        date_str = str(row.iloc[13])
-        time_str = str(row.iloc[12])
-        ts = f"{date_str} {time_str}"
-
-        return {
-            "name": "伦敦金",
-            "current": current,
-            "change": change,
-            "pct": pct,
-            "prev_close": prev_close,
-            "ts": ts,
-            "source": "Akshare"
-        }
-    except Exception as exc:
-        raise ValueError(f"Akshare黄金获取失败: {exc}")
-
-
-def fetch_shanghai_gold_sge(symbol: str = "Au(T+D)"):
-    """Fetch Shanghai Gold Exchange spot quotation and compute change/pct from latest two ticks."""
-    try:
-        df = ak.spot_quotations_sge(symbol=symbol)
-    except Exception as exc:
-        raise ValueError(f"SGE 行情获取失败: {exc}")
-
-    if df is None or df.empty:
-        raise ValueError("SGE 行情为空")
-
-    try:
-        df = df.dropna(subset=["现价"]).copy()
-        last_row = df.iloc[-1]
-        current = float(last_row["现价"])
-        ts = f"{last_row.get('更新时间', '')} {last_row.get('时间', '')}".strip()
-
-        if len(df) >= 2:
-            prev = float(df.iloc[-2]["现价"])
-        else:
-            prev = current
-
-        change = current - prev
-        pct = (change / prev * 100) if prev else 0.0
-
-        return {
-            "name": f"上海金 {symbol}",
-            "current": current,
-            "change": change,
-            "pct": pct,
-            "prev_close": prev,
-            "ts": ts or datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "source": "Akshare(SGE)",
-        }
-    except Exception as exc:
-        raise ValueError(f"SGE 行情解析失败: {exc}")
 
 
 def fetch_cn_indices(configs: list[dict] | None = None):
@@ -319,7 +232,6 @@ def fetch_cn_indices(configs: list[dict] | None = None):
                         "change": _to_float(data.get("f169")),
                         "pct": _to_float(data.get("f170")),
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "source": "Eastmoney",
                     }
                 except Exception as exc:
                     last_err = exc
@@ -341,7 +253,6 @@ def fetch_cn_indices(configs: list[dict] | None = None):
                     "change": _to_float(data.get("f169")),
                     "pct": _to_float(data.get("f170")),
                     "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "source": "Eastmoney",
                 }
             except Exception as exc:
                 last_err = exc
@@ -470,24 +381,6 @@ def fund_list_stats_from_history(code: str):
     }
 
 
-def fetch_usdcny():
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{FX_USDCNY}"
-    params = {"range": "1d", "interval": "1m"}
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=6)
-    result = resp.json().get("chart", {}).get("result")
-    if not result:
-        raise ValueError("汇率接口无数据")
-    meta = result[0].get("meta", {})
-    last = meta.get("regularMarketPrice")
-    if not last:
-        indicators = result[0].get("indicators", {}).get("quote", [{}])[0]
-        closes = indicators.get("close") or []
-        last = [c for c in closes if c][-1] if closes else None
-    if not last:
-        raise ValueError("汇率数据缺失")
-    return float(last)
-
-
 def fetch_fund_history_data(code: str):
     try:
         df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
@@ -508,67 +401,6 @@ def fetch_fund_history_data(code: str):
         raise ValueError(f"基金历史数据解析失败: {exc}")
 
     return df
-
-
-def plot_fund_chart(code: str, name: str = ""):
-    try:
-        df = fetch_fund_history_data(code)
-    except Exception as e:
-        LOGGER.exception("制图失败: %s", code)
-        return
-
-    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
-    values = df["单位净值"].astype(float).tolist()
-
-    # 简单计算均线用于显示
-    ma_days = [5, 10, 20, 250]
-    ma_lines = []
-
-    # pyecharts 需要列表数据
-    for d in ma_days:
-        # Pandas rolling mean
-        ma = df["单位净值"].rolling(window=d).mean()
-        ma_list = ma.astype(float).where(pd.notnull(ma), None).tolist()
-        ma_lines.append((d, ma_list))
-
-    c = (
-        Line()
-        .add_xaxis(dates)
-        .add_yaxis(
-            "单位净值",
-            values,
-            is_symbol_show=False,
-            label_opts=opts.LabelOpts(is_show=False),
-            linestyle_opts=opts.LineStyleOpts(width=2),
-        )
-    )
-
-    for d, ma_data in ma_lines:
-        c.add_yaxis(
-            f"MA{d}",
-            ma_data,
-            is_symbol_show=False,
-            is_smooth=True,
-            linestyle_opts=opts.LineStyleOpts(width=1),
-            label_opts=opts.LabelOpts(is_show=False),
-        )
-
-    c.set_global_opts(
-        title_opts=opts.TitleOpts(title=f"{name} ({code}) 净值走势"),
-        tooltip_opts=opts.TooltipOpts(trigger="axis"),
-        datazoom_opts=[opts.DataZoomOpts(range_start=80, range_end=100), opts.DataZoomOpts(type_="inside", range_start=80, range_end=100)],
-        xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-        yaxis_opts=opts.AxisOpts(
-            type_="value",
-            is_scale=True,
-        ),
-        toolbox_opts=opts.ToolboxOpts(is_show=True),
-    )
-
-    filename = f"fund_{code}_chart.html"
-    filepath = os.path.abspath(filename)
-    c.render(filepath)
-    webbrowser.open(f"file://{filepath}")
 
 
 def fund_history_stats(code: str):
@@ -643,133 +475,6 @@ def fund_history_stats(code: str):
     }
 
 
-def next_gold_open(now: datetime):
-    if now.weekday() < 5:
-        return None, True  # 简化为工作日 24h
-    days_ahead = (7 - now.weekday()) % 7 or 1
-    target_date = (now + timedelta(days=days_ahead)).date()
-    return datetime.combine(target_date, time(hour=6, minute=0)), False
-
-
-def fetch_kline_yahoo(symbol: str, range_str: str, interval: str):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"range": range_str, "interval": interval}
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=8)
-    data = resp.json().get("chart", {}).get("result")
-    if not data:
-        raise ValueError("K线接口无数据")
-    result = data[0]
-    timestamps = result.get("timestamp")
-    indicators = result.get("indicators", {}).get("quote", [{}])[0]
-    opens = indicators.get("open")
-    highs = indicators.get("high")
-    lows = indicators.get("low")
-    closes = indicators.get("close")
-    if not (timestamps and opens and highs and lows and closes):
-        raise ValueError("K线数据缺失")
-
-    records = []
-    for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes):
-        if None in (ts, o, h, l, c):
-            continue
-        dt = datetime.fromtimestamp(ts)
-        records.append((dt, o, h, l, c))
-
-    if not records:
-        raise ValueError("K线数据为空")
-
-    df = pd.DataFrame(records, columns=["Date", "Open", "High", "Low", "Close"])
-    df.set_index("Date", inplace=True)
-    return df
-
-
-def _parse_range_days(range_str: str) -> int | None:
-    mapping = {
-        "5d": 5,
-        "1mo": 31,
-        "3mo": 93,
-        "6mo": 186,
-        "1y": 366,
-        "2y": 366 * 2,
-        "5y": 366 * 5,
-        "10y": 366 * 10,
-        "max": None,
-    }
-    return mapping.get(range_str)
-
-
-def fetch_kline_stooq(symbol: str, preset: dict):
-    """Fetch daily K-line from Stooq.
-
-    Note: Stooq is daily-only for this endpoint, so preset["interval"] is ignored.
-    Returns DataFrame indexed by Date with columns: Open, High, Low, Close.
-    """
-
-    stooq_symbol = STOOQ_MAP.get(symbol)
-    if not stooq_symbol:
-        raise ValueError(f"Stooq不支持该symbol: {symbol}")
-
-    url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
-    resp = requests.get(url, headers=HEADERS, timeout=10)
-    if resp.status_code != 200 or not resp.text:
-        raise ValueError("Stooq接口返回异常")
-
-    from io import StringIO
-
-    df = pd.read_csv(StringIO(resp.text))
-    if df is None or df.empty:
-        raise ValueError("Stooq数据为空")
-
-    expected = {"Date", "Open", "High", "Low", "Close"}
-    if not expected.issubset(set(df.columns)):
-        raise ValueError("Stooq数据列缺失")
-
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).copy()
-    df.sort_values("Date", inplace=True)
-    df.set_index("Date", inplace=True)
-
-    for col in ["Open", "High", "Low", "Close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
-
-    days = _parse_range_days(str(preset.get("range") or ""))
-    if days is not None:
-        cutoff = datetime.now() - timedelta(days=days)
-        df = df[df.index >= cutoff]
-
-    if df.empty:
-        raise ValueError("Stooq过滤后无数据")
-
-    return df
-
-
-def render_gold_kline_png_bytes(preset: dict | None = None) -> bytes:
-    preset = preset or {"range": "6mo", "interval": "1d"}
-    try:
-        df = fetch_kline_stooq(YF_GOLD, preset)
-    except Exception:
-        df = fetch_kline_yahoo(YF_GOLD, str(preset.get("range") or "6mo"), str(preset.get("interval") or "1d"))
-
-    df = df[["Open", "High", "Low", "Close"]].copy()
-
-    style = mpf.make_mpf_style(base_mpf_style="charles")
-    fig, _axes = mpf.plot(
-        df,
-        type="candle",
-        style=style,
-        volume=False,
-        returnfig=True,
-        figsize=(9, 4.8),
-        title="XAUUSD K-line",
-    )
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    return buf.getvalue()
-
-
 def render_fund_nav_png_bytes(code: str) -> bytes:
     df = fetch_fund_history_data(code)
     dates = df["净值日期"]
@@ -822,7 +527,7 @@ def render_fund_nav_png_bytes(code: str) -> bytes:
 
 def write_dynamic_chart_html(tgt: dict) -> Path:
     name = tgt["label"].split(" ")[0]
-    embed = get_chart_html(tgt["code"], name, tgt["type"])
+    embed = get_chart_html(tgt["code"], name)
     html = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -839,91 +544,49 @@ def write_dynamic_chart_html(tgt: dict) -> Path:
 
 
 
-def get_chart_html(code: str, name: str = "", chart_type="fund", symbol_data=None):
-    c = None
-    if chart_type == "fund":
-        try:
-            df = fetch_fund_history_data(code)
-            dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
-            values = df["单位净值"].astype(float).tolist()
+def get_chart_html(code: str, name: str = ""):
+    try:
+        df = fetch_fund_history_data(code)
+        dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
+        values = df["单位净值"].astype(float).tolist()
 
-            ma_days = [5, 10, 20, 250]
-            ma_lines = []
-            for d in ma_days:
-                ma = df["单位净值"].rolling(window=d).mean()
-                ma_list = ma.astype(float).where(pd.notnull(ma), None).tolist()
-                ma_lines.append((d, ma_list))
+        ma_days = [5, 10, 20, 250]
+        ma_lines = []
+        for d in ma_days:
+            ma = df["单位净值"].rolling(window=d).mean()
+            ma_list = ma.astype(float).where(pd.notnull(ma), None).tolist()
+            ma_lines.append((d, ma_list))
 
-            c = (
-                Line()
-                .add_xaxis(dates)
-                .add_yaxis(
-                    "单位净值",
-                    values,
-                    is_symbol_show=False,
-                    label_opts=opts.LabelOpts(is_show=False),
-                    linestyle_opts=opts.LineStyleOpts(width=2),
-                )
+        c = (
+            Line()
+            .add_xaxis(dates)
+            .add_yaxis(
+                "单位净值",
+                values,
+                is_symbol_show=False,
+                label_opts=opts.LabelOpts(is_show=False),
+                linestyle_opts=opts.LineStyleOpts(width=2),
             )
-            for d, ma_data in ma_lines:
-                c.add_yaxis(
-                    f"MA{d}",
-                    ma_data,
-                    is_symbol_show=False,
-                    is_smooth=True,
-                    linestyle_opts=opts.LineStyleOpts(width=1),
-                    label_opts=opts.LabelOpts(is_show=False),
-                )
-            c.set_global_opts(
-                title_opts=opts.TitleOpts(title=f"{name} ({code}) 净值走势"),
-                tooltip_opts=opts.TooltipOpts(trigger="axis"),
-                datazoom_opts=[opts.DataZoomOpts(range_start=80, range_end=100)],
-                xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-                yaxis_opts=opts.AxisOpts(type_="value", is_scale=True),
+        )
+        for d, ma_data in ma_lines:
+            c.add_yaxis(
+                f"MA{d}",
+                ma_data,
+                is_symbol_show=False,
+                is_smooth=True,
+                linestyle_opts=opts.LineStyleOpts(width=1),
+                label_opts=opts.LabelOpts(is_show=False),
             )
-        except Exception:
-            return "<div>暂无数据</div>"
-
-    elif chart_type == "gold":
-        # Simplified Gold K-Line using Stooq helper logic (re-implemented for pyecharts)
-        try:
-            # We need to fetch K-Line data here or pass it in.
-            # For simplicity, we re-fetch Stooq data synchronously or reuse existing logic
-            # But the existing fetch_kline_stooq is coupled? No, it's standalone.
-            # We use '近半年' preset by default
-            preset = {"range": "6mo", "interval": "1d"}
-            try:
-                df = fetch_kline_stooq("XAUUSD=X", preset)
-            except Exception:
-                df = fetch_kline_yahoo("XAUUSD=X", "6mo", "1d")
-
-            dates = df.index.strftime("%Y-%m-%d").tolist()
-            # Pyecharts Kline data: [Open, Close, Low, High]
-            data = df[["Open", "Close", "Low", "High"]].values.tolist()
-
-            c = (
-                Kline()
-                .add_xaxis(dates)
-                .add_yaxis(
-                    "黄金K线",
-                    data,
-                    itemstyle_opts=opts.ItemStyleOpts(color="#ef232a", color0="#14b143"),
-                )
-                .set_global_opts(
-                    title_opts=opts.TitleOpts(title="伦敦金 (Stooq/Yahoo)"),
-                    xaxis_opts=opts.AxisOpts(is_scale=True),
-                    yaxis_opts=opts.AxisOpts(is_scale=True, splitarea_opts=opts.SplitAreaOpts(is_show=True, areastyle_opts=opts.AreaStyleOpts(opacity=1))),
-                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=80, range_end=100), opts.DataZoomOpts(range_start=80, range_end=100)],
-                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
-                )
-            )
-
-        except Exception as e:
-            return f"<div>获取K线失败: {e}</div>"
-
-    if c:
+        c.set_global_opts(
+            title_opts=opts.TitleOpts(title=f"{name} ({code}) 净值走势"),
+            tooltip_opts=opts.TooltipOpts(trigger="axis"),
+            datazoom_opts=[opts.DataZoomOpts(range_start=80, range_end=100)],
+            xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
+            yaxis_opts=opts.AxisOpts(type_="value", is_scale=True),
+        )
         return c.render_embed()
-    return "<div>无法生成图表</div>"
+    except Exception:
+        return "<div>暂无数据</div>"
 
 
 class FletApp:
@@ -2492,12 +2155,6 @@ class FletApp:
         if self.active_tab == "fund_list":
             self.page.update()
 
-    def _set_metric_spans(self, control: ft.Text, label: str, value: str, value_color: str = VALUE_TEXT):
-        control.spans = [
-            ft.TextSpan(f"{label}: ", style=ft.TextStyle(color=SUBTEXT)),
-            ft.TextSpan(value, style=ft.TextStyle(color=value_color, weight=ft.FontWeight.W_600)),
-        ]
-
     def _detail_holding_action_config(self, code: str | None) -> dict:
         normalized_code = normalize_fund_code(code)
         fund_item = self._get_fund_config_item(normalized_code) if normalized_code else {}
@@ -2753,69 +2410,6 @@ class FletApp:
             },
         ]
 
-    def _pct_cell(self, raw_value) -> ft.DataCell:
-        return ft.DataCell(self._pct_text(raw_value))
-
-    def _pct_text(self, raw_value) -> ft.Text:
-        if raw_value is None:
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        try:
-            v = float(raw_value)
-        except Exception:
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        color = UP if v > 0 else DOWN if v < 0 else VALUE_TEXT
-        sign = "+" if v > 0 else ""
-        return ft.Text(
-            f"{sign}{v:.2f}%",
-            color=color,
-            weight=ft.FontWeight.W_600,
-            font_family=FONT_MONO,
-            text_align=ft.TextAlign.CENTER,
-        )
-
-    def _number_text(self, raw_value, *, digits: int = 2, suffix: str = "") -> ft.Text:
-        if raw_value is None:
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        return ft.Text(
-            f"{value:.{digits}f}{suffix}",
-            color=VALUE_TEXT,
-            weight=ft.FontWeight.W_600,
-            font_family=FONT_MONO,
-            text_align=ft.TextAlign.CENTER,
-        )
-
-    def _money_text(self, raw_value, *, colorize: bool = False) -> ft.Text:
-        if raw_value is None:
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            return ft.Text("--", color=SUBTEXT, font_family=FONT_MONO, text_align=ft.TextAlign.CENTER)
-
-        if colorize:
-            color = UP if value > 0 else DOWN if value < 0 else VALUE_TEXT
-            text = f"+¥{value:.2f}" if value > 0 else f"-¥{abs(value):.2f}" if value < 0 else f"¥{value:.2f}"
-        else:
-            color = VALUE_TEXT
-            text = f"¥{value:.2f}"
-
-        return ft.Text(
-            text,
-            color=color,
-            weight=ft.FontWeight.W_600,
-            font_family=FONT_MONO,
-            text_align=ft.TextAlign.CENTER,
-        )
-
     def _module_card(self, content: ft.Control, *, padding: int = 14, expand: bool | int | None = None) -> ft.Container:
         return ft.Container(
             content=content,
@@ -2831,92 +2425,6 @@ class FletApp:
             ),
             expand=expand,
         )
-
-    def _fund_list_right_cell(self, content: ft.Control) -> ft.Container:
-        return ft.Container(
-            width=getattr(self, "_fund_list_pct_width", 110),
-            alignment=ft.Alignment(0, 0),
-            content=ft.Row([content], alignment=ft.MainAxisAlignment.CENTER, expand=True),
-            padding=0,
-        )
-
-    def _fund_list_action_cell(self, content: ft.Control) -> ft.Container:
-        return ft.Container(
-            width=getattr(self, "_fund_list_action_width", 70),
-            content=ft.Row([content], alignment=ft.MainAxisAlignment.CENTER),
-            padding=0,
-        )
-
-    def _txt_cell(
-        self,
-        text: str,
-        color: str = VALUE_TEXT,
-        *,
-        weight: str | None = None,
-        monospace: bool = False,
-    ) -> ft.DataCell:
-        return ft.DataCell(
-            ft.Text(
-                text,
-                color=color,
-                weight=weight or ft.FontWeight.W_600,
-                font_family=(FONT_MONO if monospace else FONT_SANS),
-            )
-        )
-
-    def _set_returns_table(self, chg3_raw, chg7_raw, chg15_raw, chg30_raw):
-        self.tbl_returns.rows = [
-            ft.DataRow(cells=[self._txt_cell("近3日", SUBTEXT, weight=ft.FontWeight.W_500), self._pct_cell(chg3_raw)]),
-            ft.DataRow(cells=[self._txt_cell("近7日", SUBTEXT, weight=ft.FontWeight.W_500), self._pct_cell(chg7_raw)]),
-            ft.DataRow(cells=[self._txt_cell("近15日", SUBTEXT, weight=ft.FontWeight.W_500), self._pct_cell(chg15_raw)]),
-            ft.DataRow(cells=[self._txt_cell("近30日", SUBTEXT, weight=ft.FontWeight.W_500), self._pct_cell(chg30_raw)]),
-        ]
-
-    def _set_ma_table(
-        self,
-        ma5: str,
-        ma10: str,
-        ma20: str,
-        ma250: str,
-        dist5: str,
-        dist10: str,
-        dist20: str,
-        dist250: str,
-        dist5_color: str,
-        dist10_color: str,
-        dist20_color: str,
-        dist250_color: str,
-    ):
-        self.tbl_ma.rows = [
-            ft.DataRow(
-                cells=[
-                    self._txt_cell("MA5", SUBTEXT, weight=ft.FontWeight.W_500),
-                    self._txt_cell(ma5, VALUE_TEXT, monospace=True),
-                    self._txt_cell(dist5, dist5_color, monospace=True),
-                ]
-            ),
-            ft.DataRow(
-                cells=[
-                    self._txt_cell("MA10", SUBTEXT, weight=ft.FontWeight.W_500),
-                    self._txt_cell(ma10, VALUE_TEXT, monospace=True),
-                    self._txt_cell(dist10, dist10_color, monospace=True),
-                ]
-            ),
-            ft.DataRow(
-                cells=[
-                    self._txt_cell("MA20", SUBTEXT, weight=ft.FontWeight.W_500),
-                    self._txt_cell(ma20, VALUE_TEXT, monospace=True),
-                    self._txt_cell(dist20, dist20_color, monospace=True),
-                ]
-            ),
-            ft.DataRow(
-                cells=[
-                    self._txt_cell("MA250", SUBTEXT, weight=ft.FontWeight.W_500),
-                    self._txt_cell(ma250, VALUE_TEXT, monospace=True),
-                    self._txt_cell(dist250, dist250_color, monospace=True),
-                ]
-            ),
-        ]
 
     def _cache_key(self, tgt: dict) -> str:
         return str(tgt.get("key") or tgt.get("code") or "")
@@ -3101,22 +2609,11 @@ class FletApp:
     def _fetch_data(self, tgt: dict):
         cache_key = self._cache_key(tgt)
         try:
-            res = None
-            rate_res = None
-            rate_err = None
-
-            if tgt["type"] == "gold":
-                res = fetch_gold()
-                try:
-                    rate_res = fetch_usdcny()
-                except Exception as ex:
-                    rate_err = ex
-            elif tgt["type"] == "fund":
-                res = fetch_fund(tgt["code"])
+            res = fetch_fund(tgt["code"])
 
             # Post updates to UI
             fetch_time = datetime.now().strftime("%H:%M:%S")
-            self._safe_run_task(self._update_ui, cache_key, tgt, res, rate_res, rate_err, fetch_time)
+            self._safe_run_task(self._update_ui, cache_key, tgt, res, fetch_time)
 
             # Update Chart if needed
             if tgt["code"] != self.current_chart_code:
@@ -3161,7 +2658,7 @@ class FletApp:
             self.txt_header_time.value = f"拉取中... | 上次更新 {prev}" if prev else "拉取中..."
         self.page.update()
 
-    async def _update_ui(self, cache_key: str, tgt, res, rate_res, rate_err, fetch_time):
+    async def _update_ui(self, cache_key: str, tgt, res, fetch_time):
         if not res:
             self._cache.setdefault(cache_key, {})["last_fetch_time"] = fetch_time
             if cache_key == self._cache_key(self.current_target_data()):
@@ -3179,52 +2676,15 @@ class FletApp:
         # Header time prefers source timestamp
         header_time = res.get("ts") or fetch_time
 
-        def fmt_pct_plain(v):
-            return "--" if v is None else f"{float(v):.2f}%"
-
-        def fmt_pct_signed(v):
-            if v is None:
-                return "--"
-            fv = float(v)
-            return f"+{fv:.2f}%" if fv > 0 else f"{fv:.2f}%"
-
-        def fmt_num(v):
-            return "--" if v is None else f"{float(v):.4f}"
-
         chg3_raw = res.get("chg3")
         chg7_raw = res.get("chg7")
         chg15_raw = res.get("chg15")
         chg30_raw = res.get("chg30")
 
-        pctile = fmt_pct_plain(res.get("percentile"))
-        ma5 = fmt_num(res.get("ma5"))
-        ma10 = fmt_num(res.get("ma10"))
-        ma20 = fmt_num(res.get("ma20"))
-        ma250 = fmt_num(res.get("ma250"))
-
         dist5_raw = res.get("dist_ma5")
-        dist5 = fmt_pct_signed(dist5_raw)
-        dist5_color = SUBTEXT
-        if dist5_raw is not None:
-            dist5_color = UP if float(dist5_raw) > 0 else DOWN if float(dist5_raw) < 0 else TEXT
-
         dist10_raw = res.get("dist_ma10")
-        dist10 = fmt_pct_signed(dist10_raw)
-        dist10_color = SUBTEXT
-        if dist10_raw is not None:
-            dist10_color = UP if float(dist10_raw) > 0 else DOWN if float(dist10_raw) < 0 else TEXT
-
         dist20_raw = res.get("dist_ma20")
-        dist20 = fmt_pct_signed(dist20_raw)
-        dist20_color = SUBTEXT
-        if dist20_raw is not None:
-            dist20_color = UP if float(dist20_raw) > 0 else DOWN if float(dist20_raw) < 0 else TEXT
-
         dist250_raw = res.get("dist_ma250")
-        dist250 = fmt_pct_signed(dist250_raw)
-        dist250_color = SUBTEXT
-        if dist250_raw is not None:
-            dist250_color = UP if float(dist250_raw) > 0 else DOWN if float(dist250_raw) < 0 else TEXT
 
         holding_item = {"holding_units": None, "holding_cost_amount": None, "daily_profit": None, "total_profit": None}
         if tgt.get("type") == "fund":
@@ -3268,23 +2728,6 @@ class FletApp:
                 "txt_price": price_text,
                 "txt_change": change_text,
                 "txt_change_color": change_color,
-                "chg3_raw": chg3_raw,
-                "chg7_raw": chg7_raw,
-                "chg15_raw": chg15_raw,
-                "chg30_raw": chg30_raw,
-                "percentile": pctile,
-                "ma5": ma5,
-                "ma10": ma10,
-                "ma20": ma20,
-                "ma250": ma250,
-                "dist_ma5": dist5,
-                "dist_ma5_color": dist5_color,
-                "dist_ma10": dist10,
-                "dist_ma10_color": dist10_color,
-                "dist_ma20": dist20,
-                "dist_ma20_color": dist20_color,
-                "dist_ma250": dist250,
-                "dist_ma250_color": dist250_color,
                 "detail_holding_raw": holding_item,
                 "detail_return_raw": detail_return_raw,
                 "detail_ma_raw": detail_ma_raw,
@@ -3312,10 +2755,7 @@ class FletApp:
 
     def _render_chart_worker(self, cache_key: str, tgt: dict):
         try:
-            if tgt["type"] == "gold":
-                png_bytes = render_gold_kline_png_bytes({"range": "6mo", "interval": "1d"})
-            else:
-                png_bytes = render_fund_nav_png_bytes(tgt["code"])
+            png_bytes = render_fund_nav_png_bytes(tgt["code"])
         except Exception as exc:
             LOGGER.exception("Chart render failed: %s", self._cache_key(tgt))
             self._safe_run_task(self._apply_chart_result, cache_key, None, str(exc))
@@ -3365,30 +2805,6 @@ class FletApp:
                 else:
                     self.manual_refresh()
         threading.Thread(target=loop, daemon=True).start()
-
-        # Countdown loop
-        def cd_loop():
-            import time as tm
-            while self.running:
-                # Reuse next_*_open logic
-                now = datetime.now()
-                tgt = self.current_target_data()
-                msg = "--"
-                if tgt["type"] == "gold":
-                    target, is_open = next_gold_open(now)
-                    if is_open:
-                        msg = "交易中"
-                    elif target:
-                        d = target - now
-                        msg = f"距开盘 {d}"
-                else:
-                    msg = "基金收盘"
-
-                # We can't update UI directly from thread easily without page.run_task or similar mechanism if async not set up for pure loop
-                # Simpler: just ignore countdown for this snippet or implement simpler
-                pass
-                tm.sleep(1)
-        # Ignoring countdown update for brevity/stability in this refactor
 
 
 def main(page: ft.Page):
