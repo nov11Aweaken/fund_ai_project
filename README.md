@@ -83,3 +83,15 @@ Flet 桌面程序，通过下拉菜单查看上证指数、伦敦黄金现货，
 - 指数提示“EM无可用数据”时，请先看日志：`%LOCALAPPDATA%/market_watch/app.log`。
 - 若源码可用但 EXE 失败，通常是运行环境网络策略差异（代理、白名单、证书链）或本机依赖缓存异常。
 - 建议优先使用 `main.spec` 打包，避免遗漏运行时依赖与证书资源。
+
+## 代理开发约束
+- 本仓库中的智能编码代理与用户交流时统一使用中文。
+- 本仓库中的智能编码代理编写或修改 Markdown 文档时统一使用中文。
+- 代理执行代码修改时应优先遵循仓库根目录下的 `AGENTS.md`。
+- 代理还应同时遵循 `.github/copilot-instructions.md` 中的仓库规则。
+- 市场指数页面仅允许使用 AkShare 的 Eastmoney 指数数据，不要为该页面重新引入 Sina 或其他数据源回退逻辑。
+- 市场指数集合与匹配规则必须继续由 `MARKET_INDEX_CONFIGS` 驱动，并保持“代码优先”。
+- 基金配置归一化、持仓校验、配置持久化优先复用 `funds_manager.py` 中已有辅助函数。
+- 正常功能开发中不要修改 `build/`、`dist/` 下的生成文件，除非任务明确与打包产物有关。
+- 新增或修改逻辑后，优先补充或更新 `tests/` 下的针对性测试。
+- 单个测试优先使用 `pytest` 运行，例如：`python -m pytest tests/test_funds_manager.py::FundsManagerTests::test_add_fund_and_save_preserves_existing_holding -q`
