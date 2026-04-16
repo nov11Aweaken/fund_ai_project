@@ -11,6 +11,7 @@ dist/
 .vscode/
 .idea/
 .github/
+.worktrees/
 
 # OS files
 .DS_Store
