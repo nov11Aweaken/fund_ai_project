@@ -10,7 +10,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=collect_dynamic_libs('py_mini_racer'),
-    datas=[(certifi_cacert_path, 'certifi')] + collect_data_files('akshare') + collect_data_files('py_mini_racer'),
+    datas=[
+        (certifi_cacert_path, 'certifi'),
+        ('.\\assets\\echarts.min.js', 'assets'),
+    ] + collect_data_files('akshare') + collect_data_files('py_mini_racer'),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

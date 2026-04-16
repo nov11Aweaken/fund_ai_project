@@ -6,9 +6,11 @@ import sys
 import logging
 import tempfile
 import io
+import shutil
 import time as time_module
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 import flet as ft
 import akshare as ak
@@ -64,6 +66,7 @@ MARKET_MIN_REFRESH_SECONDS = 120
 HEADERS = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
 EM_HEADERS = {"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
 REFRESH_MS = 300000  # 5分钟自动刷新
+DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
 
 
 def build_market_placeholder_items() -> list[dict]:
@@ -525,68 +528,150 @@ def render_fund_nav_png_bytes(code: str) -> bytes:
     return buf.getvalue()
 
 
-def write_dynamic_chart_html(tgt: dict) -> Path:
-    name = tgt["label"].split(" ")[0]
-    embed = get_chart_html(tgt["code"], name)
-    html = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"<title>{name} 图表</title>"
-        "</head><body style='margin:0;padding:0'>"
-        + embed
-        + "</body></html>"
+def _ensure_dynamic_chart_asset(output_dir: Path) -> Path:
+    asset_path = output_dir / DYNAMIC_CHART_ASSET_NAME
+    try:
+        if asset_path.exists() and asset_path.stat().st_size > 0:
+            return asset_path
+    except OSError as exc:
+        raise ValueError(f"ECharts 运行时资源不可访问: {exc}") from exc
+
+    bundled_asset = _app_dir() / "assets" / DYNAMIC_CHART_ASSET_NAME
+    try:
+        if not bundled_asset.exists() or bundled_asset.stat().st_size <= 0:
+            raise ValueError(f"缺少本地 ECharts 资源: {bundled_asset}")
+    except OSError as exc:
+        raise ValueError(f"缺少本地 ECharts 资源: {bundled_asset}") from exc
+
+    try:
+        shutil.copyfile(bundled_asset, asset_path)
+    except OSError as exc:
+        raise ValueError(f"ECharts 资源复制失败: {exc}") from exc
+    return asset_path
+
+
+def build_dynamic_chart_options(code: str, name: str = "") -> dict:
+    try:
+        df = fetch_fund_history_data(code)
+        df = df.copy()
+        df["单位净值"] = df["单位净值"].astype(float)
+    except Exception as exc:
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
+
+    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
+    values = df["单位净值"].tolist()
+    if not dates or not values:
+        raise ValueError("动态K线图历史数据为空")
+
+    title_name = (name or "").strip() or code
+    ma_days = [5, 10, 20, 250]
+    ma_lines: list[tuple[int, list[float | None]]] = []
+    for days in ma_days:
+        ma = df["单位净值"].rolling(window=days).mean()
+        ma_lines.append((days, ma.where(pd.notnull(ma), None).tolist()))
+
+    chart = (
+        Line()
+        .add_xaxis(dates)
+        .add_yaxis(
+            "单位净值",
+            values,
+            is_symbol_show=False,
+            label_opts=opts.LabelOpts(is_show=False),
+            linestyle_opts=opts.LineStyleOpts(width=2.5, color=ACCENT),
+        )
     )
+    for days, ma_values in ma_lines:
+        chart.add_yaxis(
+            f"MA{days}",
+            ma_values,
+            is_symbol_show=False,
+            is_smooth=True,
+            label_opts=opts.LabelOpts(is_show=False),
+            linestyle_opts=opts.LineStyleOpts(width=1.2),
+        )
+
+    chart.set_global_opts(
+        title_opts=opts.TitleOpts(title=f"{title_name} ({code}) 净值走势"),
+        legend_opts=opts.LegendOpts(pos_top="4%"),
+        tooltip_opts=opts.TooltipOpts(trigger="axis"),
+        datazoom_opts=[
+            opts.DataZoomOpts(type_="inside", range_start=75, range_end=100),
+            opts.DataZoomOpts(type_="slider", range_start=75, range_end=100, pos_bottom="2%"),
+        ],
+        xaxis_opts=opts.AxisOpts(
+            type_="category",
+            boundary_gap=False,
+            axislabel_opts=opts.LabelOpts(rotate=35),
+        ),
+        yaxis_opts=opts.AxisOpts(type_="value", is_scale=True),
+    )
+    return {
+        "title": f"{title_name} ({code}) 净值走势",
+        "option_json": chart.dump_options(),
+    }
+
+
+def build_dynamic_chart_document(title: str, option_json: str, script_src: str) -> str:
+    safe_title = escape(title, quote=True)
+    safe_script_src = escape(script_src, quote=True)
+    return (
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        f"<title>{safe_title}</title>"
+        f"<script src=\"{safe_script_src}\"></script>"
+        "<style>"
+        "html,body{margin:0;height:100%;background:#F0F2F5;}"
+        "body{font-family:'Microsoft YaHei UI','Segoe UI',sans-serif;color:#111827;}"
+        ".page{height:100vh;display:flex;flex-direction:column;padding:16px;box-sizing:border-box;gap:12px;}"
+        ".toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}"
+        ".title{font-size:18px;font-weight:700;}"
+        ".hint{font-size:12px;color:#6B7280;}"
+        ".chart-card{flex:1;min-height:420px;background:#FFFFFF;border-radius:16px;"
+        "box-shadow:0 8px 24px rgba(15,23,42,.08);padding:12px;box-sizing:border-box;}"
+        "#dynamic-chart{width:100%;height:100%;}"
+        "</style></head><body>"
+        "<div class='page'>"
+        f"<div class='toolbar'><div class='title'>{safe_title}</div>"
+        "<div class='hint'>支持缩放、悬浮提示和图片导出</div></div>"
+        "<div class='chart-card'><div id='dynamic-chart'></div></div>"
+        "</div>"
+        "<script>"
+        "const chart = echarts.init(document.getElementById('dynamic-chart'), 'white', {renderer: 'canvas', locale: 'ZH'});"
+        f"const option = {option_json};"
+        "chart.setOption(option);"
+        "window.addEventListener('resize', () => chart.resize());"
+        "</script></body></html>"
+    )
+
+
+def write_dynamic_chart_html(tgt: dict) -> Path:
+    code = str(tgt.get("code") or "").strip()
+    if not code:
+        raise ValueError("基金代码不能为空")
+    name = str(tgt.get("label") or "").split(" (")[0].strip() or code
     out_dir = _log_dir() / "charts"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"dynamic_{tgt['type']}_{tgt['code']}.html"
+    asset_path = _ensure_dynamic_chart_asset(out_dir)
+    chart_data = build_dynamic_chart_options(code, name)
+    html = build_dynamic_chart_document(
+        title=str(chart_data["title"]),
+        option_json=str(chart_data["option_json"]),
+        script_src=asset_path.name,
+    )
+    out = out_dir / f"dynamic_{str(tgt.get('type') or 'fund').strip()}_{code}.html"
     out.write_text(html, encoding="utf-8")
     return out
 
 
 
-def get_chart_html(code: str, name: str = ""):
-    try:
-        df = fetch_fund_history_data(code)
-        dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
-        values = df["单位净值"].astype(float).tolist()
-
-        ma_days = [5, 10, 20, 250]
-        ma_lines = []
-        for d in ma_days:
-            ma = df["单位净值"].rolling(window=d).mean()
-            ma_list = ma.astype(float).where(pd.notnull(ma), None).tolist()
-            ma_lines.append((d, ma_list))
-
-        c = (
-            Line()
-            .add_xaxis(dates)
-            .add_yaxis(
-                "单位净值",
-                values,
-                is_symbol_show=False,
-                label_opts=opts.LabelOpts(is_show=False),
-                linestyle_opts=opts.LineStyleOpts(width=2),
-            )
-        )
-        for d, ma_data in ma_lines:
-            c.add_yaxis(
-                f"MA{d}",
-                ma_data,
-                is_symbol_show=False,
-                is_smooth=True,
-                linestyle_opts=opts.LineStyleOpts(width=1),
-                label_opts=opts.LabelOpts(is_show=False),
-            )
-        c.set_global_opts(
-            title_opts=opts.TitleOpts(title=f"{name} ({code}) 净值走势"),
-            tooltip_opts=opts.TooltipOpts(trigger="axis"),
-            datazoom_opts=[opts.DataZoomOpts(range_start=80, range_end=100)],
-            xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-            yaxis_opts=opts.AxisOpts(type_="value", is_scale=True),
-        )
-        return c.render_embed()
-    except Exception:
-        return "<div>暂无数据</div>"
+def get_chart_html(code: str, name: str = "", script_src: str = "echarts.min.js"):
+    chart_data = build_dynamic_chart_options(code, name)
+    return build_dynamic_chart_document(
+        title=str(chart_data["title"]),
+        option_json=str(chart_data["option_json"]),
+        script_src=script_src,
+    )
 
 
 class FletApp:
@@ -2586,8 +2671,20 @@ class FletApp:
         if not tgt:
             self._show_message("暂无基金")
             return
-        path = write_dynamic_chart_html(tgt)
-        webbrowser.open(path.resolve().as_uri())
+        try:
+            path = write_dynamic_chart_html(tgt)
+        except (ValueError, OSError) as exc:
+            LOGGER.exception("动态K线图生成失败: %s", tgt.get("code"))
+            self._show_message(f"动态图生成失败：{exc}")
+            return
+        try:
+            opened = webbrowser.open(path.resolve().as_uri())
+        except Exception as exc:
+            LOGGER.exception("动态K线图打开失败: %s", tgt.get("code"))
+            self._show_message(f"动态图打开失败：{exc}")
+            return
+        if not opened:
+            self._show_message("动态图打开失败：系统未找到可用的浏览器或关联程序")
 
     def manual_refresh(self):
         # We can run fetch in thread to avoid blocking UI

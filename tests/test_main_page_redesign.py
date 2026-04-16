@@ -1,12 +1,108 @@
+import tempfile
 import types
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import flet as ft
 
+import main
 from main import FletApp
 
 
 class PageRedesignHelperTests(unittest.TestCase):
+    def test_ensure_dynamic_chart_asset_copies_bundled_asset_to_output_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            assets_dir = base_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            bundled_asset = assets_dir / "echarts.min.js"
+            bundled_asset.write_text("// bundled echarts runtime", encoding="utf-8")
+            output_dir = base_dir / "charts"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(main.requests, "get", side_effect=AssertionError("不应发起网络请求")),
+            ):
+                asset_path = main._ensure_dynamic_chart_asset(output_dir)
+                self.assertEqual(asset_path.name, "echarts.min.js")
+                self.assertTrue(asset_path.exists())
+                self.assertEqual(asset_path.read_text(encoding="utf-8"), "// bundled echarts runtime")
+
+    def test_ensure_dynamic_chart_asset_raises_when_bundled_asset_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            output_dir = base_dir / "charts"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            with (
+                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(main.requests, "get", side_effect=AssertionError("不应发起网络请求")),
+            ):
+                with self.assertRaisesRegex(ValueError, "缺少本地 ECharts 资源"):
+                    main._ensure_dynamic_chart_asset(output_dir)
+
+    def test_build_dynamic_chart_document_uses_local_echarts_script_and_full_height_layout(self):
+        html = main.build_dynamic_chart_document(
+            title="测试基金 (110022) 净值走势",
+            option_json='{"series": [], "xAxis": []}',
+            script_src="echarts.min.js",
+        )
+
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+        self.assertIn("height:100vh", html)
+        self.assertIn("echarts.init", html)
+        self.assertNotIn("assets.pyecharts.org", html)
+
+    def test_write_dynamic_chart_html_writes_html_that_uses_local_echarts_script(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            charts_dir = base_dir / "charts"
+            charts_dir.mkdir(parents=True, exist_ok=True)
+            assets_dir = base_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            bundled_asset = assets_dir / "echarts.min.js"
+            bundled_asset.write_text("// echarts runtime", encoding="utf-8")
+
+            with (
+                mock.patch.object(main, "_log_dir", return_value=base_dir),
+                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(
+                    main,
+                    "build_dynamic_chart_options",
+                    return_value={
+                        "title": "测试基金 (110022) 净值走势",
+                        "option_json": '{"series": [], "xAxis": []}',
+                    },
+                ),
+            ):
+                html_path = main.write_dynamic_chart_html(
+                    {"code": "110022", "label": "测试基金 (110022)", "type": "fund"}
+                )
+                html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+        self.assertNotIn("assets.pyecharts.org", html)
+
+    def test_open_dynamic_kline_shows_message_when_browser_open_returns_false(self):
+        messages: list[str] = []
+        dummy_app = types.SimpleNamespace(
+            current_target_data=lambda: {"code": "110022", "label": "测试基金 (110022)", "type": "fund"},
+            _show_message=lambda message: messages.append(message),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "dynamic_fund_110022.html"
+            html_path.write_text("<html></html>", encoding="utf-8")
+            with (
+                mock.patch.object(main, "write_dynamic_chart_html", return_value=html_path),
+                mock.patch.object(main.webbrowser, "open", return_value=False),
+            ):
+                FletApp.open_dynamic_kline(dummy_app, None)
+
+        self.assertEqual(messages, ["动态图打开失败：系统未找到可用的浏览器或关联程序"])
+
     def test_build_market_overview_card_data_exposes_three_key_metrics(self):
         dummy_app = types.SimpleNamespace()
 
