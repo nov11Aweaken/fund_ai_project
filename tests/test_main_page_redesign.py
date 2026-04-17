@@ -47,9 +47,9 @@ class PageRedesignHelperTests(unittest.TestCase):
         # ma-controls-row DOM marker must be present
         self.assertIn("ma-controls-row", html)
 
-        # all candidate data-ma-day attributes must be present somewhere
+        # all candidate data-ma-day attributes must be present somewhere (accept single or double quotes)
         for d in days:
-            self.assertIn(f"data-ma-day='{d}'", html)
+            self.assertRegex(html, re.compile(rf"data-ma-day\s*=\s*['\"]{d}['\"]"))
 
         # ensure sequence in <body>: title ... </...> ... ma-controls-row
         body_m = re.search(r"<body[^>]*>([\s\S]*?)</body>", html, re.I)
@@ -58,16 +58,9 @@ class PageRedesignHelperTests(unittest.TestCase):
         title = chart_data.get("title", "")
         self.assertRegex(body, re.compile(re.escape(title) + r".+?</[^>]+>.+?ma-controls-row", re.S))
 
-        # examine each label block surrounding inputs
+        # examine each label block surrounding inputs: both default and non-default must be extractable
         for d in days:
-            try:
-                block = self._extract_label_block(html, d)
-            except AssertionError:
-                # missing label block acceptable for non-defaults, but default must exist
-                if d in default_days:
-                    raise
-                else:
-                    continue
+            block = self._extract_label_block(html, d)
 
             if d in default_days:
                 # strict: must contain checked, is-selected and ma-check
@@ -127,7 +120,8 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn('<script src="echarts.min.js"></script>', html)
         self.assertIn("height:100vh", html)
         self.assertIn("echarts.init", html)
-        self.assertIn("data-ma-day='5'", html)
+        # accept single or double quoted data-ma-day
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]5['\"]"))
         self.assertIn("MA250", html)
         self.assertIn("const chartData =", html)
         self.assertIn("function buildOption(selectedDays)", html)
