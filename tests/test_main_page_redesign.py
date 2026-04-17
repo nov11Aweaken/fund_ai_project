@@ -20,14 +20,63 @@ from main import FletApp
 
 class PageRedesignHelperTests(unittest.TestCase):
     def _extract_label_block(self, html: str, day: int) -> str:
-        """Extract a single <label ...>...</label> block for given data-ma-day value.
+        """Extract a single <label ...>...</label> block that contains an input[data-ma-day='X'].
         Raises AssertionError if not found.
         """
-        pattern = re.compile(rf"(<label\b[^>]*data-ma-day=['\"]{day}['\"][\s\S]*?</label>)", re.I)
+        # match a <label>...</label> that contains an <input ... data-ma-day='day' ...>
+        pattern = re.compile(rf"(<label\b[^>]*>[\s\S]*?<input\b[^>]*data-ma-day=['\"]{day}['\"][^>]*>[\s\S]*?</label>)", re.I)
         m = pattern.search(html)
         if not m:
-            raise AssertionError(f"label block for data-ma-day='{day}' not found")
+            raise AssertionError(f"label block containing input[data-ma-day='{day}'] not found")
         return m.group(1)
+
+    def _assert_dynamic_kline_ma_layout_contract(self, html: str, chart_data: dict):
+        """Assert the page contains the new MA controls layout and default selections.
+
+        Checks:
+        - ma-controls-row exists
+        - all 7 candidate days present
+        - title appears before ma-controls-row within <body> and separated by a closing tag
+        - for each candidate, the enclosing <label> that contains input[data-ma-day] can be extracted
+        - default days must contain checked, is-selected and ma-check markers
+        - non-default candidates must NOT contain those markers
+        """
+        days = [5, 10, 20, 30, 60, 120, 250]
+        default_days = chart_data.get("default_ma_days", [5, 10, 20, 250])
+
+        # ma-controls-row DOM marker must be present
+        self.assertIn("ma-controls-row", html)
+
+        # all candidate data-ma-day attributes must be present somewhere
+        for d in days:
+            self.assertIn(f"data-ma-day='{d}'", html)
+
+        # ensure sequence in <body>: title ... </...> ... ma-controls-row
+        body_m = re.search(r"<body[^>]*>([\s\S]*?)</body>", html, re.I)
+        self.assertIsNotNone(body_m)
+        body = body_m.group(1)
+        title = chart_data.get("title", "")
+        self.assertRegex(body, re.compile(re.escape(title) + r".+?</[^>]+>.+?ma-controls-row", re.S))
+
+        # examine each label block surrounding inputs
+        for d in days:
+            try:
+                block = self._extract_label_block(html, d)
+            except AssertionError:
+                # missing label block acceptable for non-defaults, but default must exist
+                if d in default_days:
+                    raise
+                else:
+                    continue
+
+            if d in default_days:
+                # strict: must contain checked, is-selected and ma-check
+                self.assertRegex(block, r"\bchecked\b", f"day {d} must include checked")
+                self.assertRegex(block, r"\bis-selected\b", f"day {d} must include is-selected")
+                self.assertRegex(block, r"\bma-check\b", f"day {d} must include ma-check")
+            else:
+                # should not contain selection markers
+                self.assertFalse(re.search(r"\bchecked\b", block) or re.search(r"\bis-selected\b", block) or re.search(r"\bma-check\b", block), f"day {d} should NOT be selected")
 
     def test_ensure_dynamic_chart_asset_copies_bundled_asset_to_output_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -89,11 +138,7 @@ class PageRedesignHelperTests(unittest.TestCase):
     def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
         """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
 
-        约束：
-        - 必须存在独立的 ma-controls-row DOM 标识
-        - 必须包含 7 个固定候选 data-ma-day='5'..'250'
-        - 默认选中项应包含 is-selected 或 ma-check 等稳定类名
-        - 标题行与提示文案不应与 MA 胶囊混在同一个 toolbar-right 容器里
+        使用统一的断言 helper 以确保不同入口的一致性。
         """
         chart_data = {
             "title": "测试基金 (110022) 净值走势",
@@ -105,39 +150,8 @@ class PageRedesignHelperTests(unittest.TestCase):
         }
         html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
 
-        # 新布局关键 DOM 标识（尚未实现，测试应因此失败）
-        self.assertIn("ma-controls-row", html)
-
-        # 7 个固定候选存在
-        for day in [5, 10, 20, 30, 60, 120, 250]:
-            self.assertIn(f"data-ma-day='{day}'", html)
-
-        # 在 <body> 范围内验证标题/提示/ma-controls-row 的顺序，避免误中 <head><title>
-        body_m = re.search(r"<body[^>]*>([\s\S]*?)</body>", html, re.I)
-        self.assertIsNotNone(body_m)
-        body = body_m.group(1)
-        title = chart_data["title"]
-        # 标题文本应出现在 ma-controls-row 之前，且中间由至少一个闭合标签分隔，表明是独立行
-        self.assertRegex(body, re.compile(re.escape(title) + r".+?</[^>]+>.+?ma-controls-row", re.S))
-        title_idx = body.find(title)
-        ma_idx = body.find("ma-controls-row")
-        self.assertTrue(title_idx != -1 and ma_idx != -1 and title_idx < ma_idx)
-
-        # 断言单个 label 块的默认/非默认选中状态
-        default_days = [5, 10, 20, 250]
-        for day in default_days:
-            block = self._extract_label_block(html, day)
-            # 默认周期应包含 checked 或稳定类名
-            self.assertTrue(re.search(r"\bchecked\b", block) or re.search(r"\b(is-selected|ma-check)\b", block), f"day {day} should be selected")
-
-        for day in [30, 60, 120]:
-            # 如果存在对应标签块，应确保不包含默认选中标记
-            try:
-                block = self._extract_label_block(html, day)
-            except AssertionError:
-                # 未找到标签块也可接受
-                continue
-            self.assertFalse(re.search(r"\bchecked\b", block) or re.search(r"\b(is-selected|ma-check)\b", block), f"day {day} should NOT be selected")
+        # 统一断言新布局契约
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
 
     def test_write_dynamic_chart_html_outputs_ma_controls_row_and_defaults(self):
         chart_data = {
@@ -171,13 +185,8 @@ class PageRedesignHelperTests(unittest.TestCase):
                 )
                 html = html_path.read_text(encoding="utf-8")
 
-        self.assertIn('<script src="echarts.min.js"></script>', html)
-        self.assertIn("ma-controls-row", html)
-        # 验证默认选中 5/10/20/250
-        default_days = [5, 10, 20, 250]
-        for day in default_days:
-            block = self._extract_label_block(html, day)
-            self.assertTrue(re.search(r"\bchecked\b", block) or re.search(r"\b(is-selected|ma-check)\b", block))
+        # 统一断言新布局契约
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
 
     def test_get_chart_html_outputs_new_layout_contract(self):
         chart_data = {
@@ -193,11 +202,8 @@ class PageRedesignHelperTests(unittest.TestCase):
             html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
 
         mock_build.assert_called_once_with("110022", "测试基金")
-        self.assertIn("ma-controls-row", html)
-        # 默认选中 5/10/20/250 应被渲染为选中状态
-        for day in [5, 10, 20, 250]:
-            block = self._extract_label_block(html, day)
-            self.assertTrue(re.search(r"\bchecked\b", block) or re.search(r"\b(is-selected|ma-check)\b", block), f"default day {day} not selected")
+        # 统一断言新布局契约
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
         self.assertIn('<script src="echarts.min.js"></script>', html)
 
     def test_build_dynamic_chart_series_keeps_nav_when_no_ma_selected(self):
