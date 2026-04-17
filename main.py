@@ -478,6 +478,45 @@ def fund_history_stats(code: str):
     }
 
 
+def build_dynamic_chart_data(code: str, name: str = "") -> dict:
+    """构造用于页面内动态图的结构化数据契约。"""
+    try:
+        df = fetch_fund_history_data(code)
+        df = df.copy()
+        df["单位净值"] = df["单位净值"].astype(float)
+    except Exception as exc:
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
+
+    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist() if not df.empty else []
+    nav_values = df["单位净值"].tolist() if not df.empty else []
+    if not dates or not nav_values:
+        raise ValueError("动态K线图历史数据为空")
+
+    ma_candidates = [5, 10, 20, 30, 60, 120, 250]
+    default_ma_days = [5, 10, 20, 250]
+    title_name = (name or "").strip() or code
+
+    ma_series: dict[str, list[float | None]] = {}
+    for days in ma_candidates:
+        ma_values = df["单位净值"].rolling(window=days).mean().tolist()
+        series: list[float | None] = []
+        for value in ma_values:
+            if pd.isna(value):
+                series.append(None)
+            else:
+                series.append(float(value))
+        ma_series[str(days)] = series
+
+    return {
+        "title": f"{title_name} ({code}) 净值走势",
+        "dates": dates,
+        "nav_values": [float(value) for value in nav_values],
+        "ma_series": ma_series,
+        "ma_candidates": ma_candidates,
+        "default_ma_days": default_ma_days,
+    }
+
+
 def render_fund_nav_png_bytes(code: str) -> bytes:
     df = fetch_fund_history_data(code)
     dates = df["净值日期"]

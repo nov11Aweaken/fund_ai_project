@@ -1,10 +1,12 @@
 import tempfile
 import types
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
 import flet as ft
+import pandas as pd
 
 import main
 from main import FletApp
@@ -224,6 +226,39 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIsInstance(panel, ft.Column)
         self.assertEqual(panel.scroll, ft.ScrollMode.AUTO)
         self.assertTrue(panel.expand)
+
+
+    def test_build_dynamic_chart_data_returns_stable_json_ready_contract(self):
+        dates = pd.date_range(end=pd.Timestamp("2023-01-10"), periods=10)
+        df = pd.DataFrame({"净值日期": dates, "单位净值": list(range(1, 11))})
+
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=df):
+            res = main.build_dynamic_chart_data("110022", "测试基金")
+
+        self.assertEqual(res["title"], "测试基金 (110022) 净值走势")
+        self.assertEqual(res["ma_candidates"], [5, 10, 20, 30, 60, 120, 250])
+        self.assertEqual(res["default_ma_days"], [5, 10, 20, 250])
+        self.assertEqual(len(res["dates"]), len(res["nav_values"]))
+        self.assertTrue(all(isinstance(value, float) for value in res["nav_values"]))
+
+        expected_keys = [str(day) for day in res["ma_candidates"]]
+        self.assertEqual(list(res["ma_series"].keys()), expected_keys)
+        for key in expected_keys:
+            self.assertEqual(len(res["ma_series"][key]), len(res["dates"]))
+
+        self.assertEqual(res["ma_series"]["5"][:4], [None, None, None, None])
+        self.assertEqual(res["ma_series"]["5"][4], 3.0)
+        self.assertEqual(json.loads(json.dumps(res)), res)
+
+    def test_build_dynamic_chart_data_raises_when_history_is_empty(self):
+        empty_df = pd.DataFrame({
+            "净值日期": pd.Series(dtype="datetime64[ns]"),
+            "单位净值": pd.Series(dtype="float64"),
+        })
+
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=empty_df):
+            with self.assertRaisesRegex(ValueError, "动态K线图历史数据为空"):
+                main.build_dynamic_chart_data("110022", "测试基金")
 
 
 if __name__ == "__main__":
