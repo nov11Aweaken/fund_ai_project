@@ -484,6 +484,10 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
         df = fetch_fund_history_data(code)
         df = df.copy()
         df["单位净值"] = df["单位净值"].astype(float)
+    except ValueError as exc:
+        if "历史数据为空" in str(exc):
+            raise ValueError("动态K线图历史数据为空") from exc
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
     except Exception as exc:
         raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
 
@@ -495,6 +499,9 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
     ma_candidates = [5, 10, 20, 30, 60, 120, 250]
     default_ma_days = [5, 10, 20, 250]
     title_name = (name or "").strip() or code
+    code_suffix = f"({code})"
+    if title_name.endswith(code_suffix):
+        title_name = title_name[:-len(code_suffix)].strip() or code
 
     ma_series: dict[str, list[float | None]] = {}
     for days in ma_candidates:

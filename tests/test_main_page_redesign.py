@@ -250,6 +250,15 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertEqual(res["ma_series"]["5"][4], 3.0)
         self.assertEqual(json.loads(json.dumps(res)), res)
 
+    def test_build_dynamic_chart_data_strips_code_suffix_from_label_name(self):
+        dates = pd.date_range(end=pd.Timestamp("2023-01-10"), periods=10)
+        df = pd.DataFrame({"净值日期": dates, "单位净值": list(range(1, 11))})
+
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=df):
+            res = main.build_dynamic_chart_data("110022", "测试基金 (110022)")
+
+        self.assertEqual(res["title"], "测试基金 (110022) 净值走势")
+
     def test_build_dynamic_chart_data_raises_when_history_is_empty(self):
         empty_df = pd.DataFrame({
             "净值日期": pd.Series(dtype="datetime64[ns]"),
@@ -257,6 +266,11 @@ class PageRedesignHelperTests(unittest.TestCase):
         })
 
         with mock.patch.object(main, "fetch_fund_history_data", return_value=empty_df):
+            with self.assertRaisesRegex(ValueError, "动态K线图历史数据为空"):
+                main.build_dynamic_chart_data("110022", "测试基金")
+
+    def test_build_dynamic_chart_data_maps_fetch_empty_error_to_dynamic_chart_empty_error(self):
+        with mock.patch.object(main, "fetch_fund_history_data", side_effect=ValueError("基金历史数据为空")):
             with self.assertRaisesRegex(ValueError, "动态K线图历史数据为空"):
                 main.build_dynamic_chart_data("110022", "测试基金")
 
