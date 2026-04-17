@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import json
+import pandas as pd
 import flet as ft
 
 import main
@@ -224,6 +226,35 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIsInstance(panel, ft.Column)
         self.assertEqual(panel.scroll, ft.ScrollMode.AUTO)
         self.assertTrue(panel.expand)
+
+
+    def test_build_dynamic_chart_data_nan_keys_and_none_and_json_roundtrip(self):
+        dates = pd.date_range("2020-01-01", periods=6, freq='D')
+        values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        df = pd.DataFrame({"净值日期": dates, "单位净值": values})
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=df):
+            data = main.build_dynamic_chart_data("110022", "测试基金")
+
+        self.assertIn("ma_series", data)
+        ms = data["ma_series"]
+        # keys are strings for stable JSON
+        self.assertTrue(all(isinstance(k, str) for k in ms.keys()))
+        self.assertIn("5", ms)
+        # early rolling windows should produce missing values which must be None (not NaN)
+        self.assertIsNone(ms["5"][0])
+        # nav values should be plain Python floats
+        self.assertTrue(all(isinstance(v, float) for v in data["nav_values"]))
+        # JSON round-trip preserves keys and nulls
+        s = json.dumps(ms)
+        loaded = json.loads(s)
+        self.assertEqual(set(loaded.keys()), set(ms.keys()))
+        self.assertIsNone(loaded["5"][0])
+
+    def test_build_dynamic_chart_data_raises_on_empty_data(self):
+        empty = pd.DataFrame(columns=["净值日期", "单位净值"])
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=empty):
+            with self.assertRaisesRegex(ValueError, "动态K线图历史数据为空"):
+                main.build_dynamic_chart_data("110022", "测试基金")
 
 
 if __name__ == "__main__":

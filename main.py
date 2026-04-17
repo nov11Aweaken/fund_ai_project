@@ -645,6 +645,56 @@ def build_dynamic_chart_options(code: str, name: str = "") -> dict:
     }
 
 
+def build_dynamic_chart_data(code: str, name: str = "") -> dict:
+    """Prepare structured chart data for the dynamic K-line page.
+
+    Returns a stable-JSON-serializable dict containing:
+    - title: str
+    - dates: list[str]
+    - nav_values: list[float]
+    - ma_series: dict[str, list[float|None]]  # keys are strings for JSON stability
+    - ma_candidates: list[int]
+    - default_ma_days: list[int]
+
+    Behavior:
+    - Convert any NaN/NA to Python None
+    - Raise ValueError("动态K线图历史数据为空") when cleaned history yields no data
+    """
+    try:
+        df = fetch_fund_history_data(code)
+        df = df.copy()
+        df["单位净值"] = df["单位净值"].astype(float)
+    except Exception as exc:
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
+
+    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist() if not df.empty else []
+    nav_values = df["单位净值"].tolist() if not df.empty else []
+    if not dates or not nav_values:
+        raise ValueError("动态K线图历史数据为空")
+
+    ma_days = [5, 10, 20, 250]
+    ma_series: dict[str, list[float | None]] = {}
+    for days in ma_days:
+        ma = df["单位净值"].rolling(window=days).mean()
+        series: list[float | None] = []
+        for v in ma.tolist():
+            if pd.isna(v):
+                series.append(None)
+            else:
+                # Ensure native Python float for JSON stability
+                series.append(float(v))
+        ma_series[str(days)] = series
+
+    return {
+        "title": f"{(name or '').strip() or code} ({code}) 净值走势",
+        "dates": dates,
+        "nav_values": [float(v) for v in nav_values],
+        "ma_series": ma_series,
+        "ma_candidates": ma_days,
+        "default_ma_days": [5, 10, 20],
+    }
+
+
 def build_dynamic_chart_document(title: str, option_json: str, script_src: str) -> str:
     safe_title = escape(title, quote=True)
     safe_script_src = escape(script_src, quote=True)
