@@ -21,14 +21,16 @@ from main import FletApp
 class PageRedesignHelperTests(unittest.TestCase):
     def _extract_label_block(self, html: str, day: int) -> str:
         """Extract a single <label ...>...</label> block that contains an input[data-ma-day='X'].
-        Raises AssertionError if not found.
+        Raises AssertionError if not found or not unique.
         """
-        # match a <label>...</label> that contains an <input ... data-ma-day='day' ...>
+        # find all <label>...</label> blocks that contain an <input ... data-ma-day='day' ...>
         pattern = re.compile(rf"(<label\b[^>]*>[\s\S]*?<input\b[^>]*data-ma-day=['\"]{day}['\"][^>]*>[\s\S]*?</label>)", re.I)
-        m = pattern.search(html)
-        if not m:
+        matches = pattern.findall(html)
+        if not matches:
             raise AssertionError(f"label block containing input[data-ma-day='{day}'] not found")
-        return m.group(1)
+        if len(matches) != 1:
+            raise AssertionError(f"expected exactly one label block for data-ma-day='{day}', found {len(matches)}")
+        return matches[0]
 
     def _assert_dynamic_kline_ma_layout_contract(self, html: str, chart_data: dict):
         """Assert the page contains the new MA controls layout and default selections.
@@ -276,7 +278,8 @@ class PageRedesignHelperTests(unittest.TestCase):
                 html = html_path.read_text(encoding="utf-8")
 
         self.assertIn('<script src="echarts.min.js"></script>', html)
-        self.assertIn("data-ma-day='5'", html)
+        # accept single or double quoted data-ma-day for day 5
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]5['\"]"))
         self.assertIn("const defaultOption =", html)
         self.assertNotIn("assets.pyecharts.org", html)
 
@@ -302,7 +305,8 @@ class PageRedesignHelperTests(unittest.TestCase):
             html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
 
         mock_build.assert_called_once_with("110022", "测试基金")
-        self.assertIn("data-ma-day='250'", html)
+        # accept single or double quoted data-ma-day for day 250
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]250['\"]"))
         self.assertIn("const chartData =", html)
         self.assertIn('<script src="echarts.min.js"></script>', html)
 
