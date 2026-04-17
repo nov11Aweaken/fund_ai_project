@@ -44,8 +44,17 @@ VALUE_TEXT = "#0F172A"
 SUBTEXT = "#6B7280"
 SURFACE_VARIANT = "#FAFAFA"  # Inner data grid / tiles
 
-FONT_SANS = "Segoe UI"
+FONT_SANS = "NotoSansSC"
 FONT_MONO = "Consolas"
+
+# Available font choices for the font switcher
+FONT_CHOICES = {
+    "NotoSansSC": "Noto Sans SC",
+    "Microsoft YaHei UI": "微软雅黑",
+    "SimHei": "黑体",
+    "Segoe UI": "Segoe UI",
+}
+FONT_PREF_KEY = "ui_font"
 MARKET_INDEX_CONFIGS = [
     {"code": "000001", "name": "上证指数", "category": "上证系列指数"},
     {"code": "000688", "name": "科创50", "category": "上证系列指数"},
@@ -169,6 +178,30 @@ def load_fund_config():
     except Exception as exc:
         LOGGER.exception("加载基金配置失败，使用默认配置")
         return DEFAULT_FUND_CONFIG["funds"]
+
+
+def _pref_path() -> Path:
+    return _app_dir() / "ui_prefs.json"
+
+
+def _load_font_pref() -> str | None:
+    try:
+        with _pref_path().open("r", encoding="utf-8") as f:
+            return json.load(f).get(FONT_PREF_KEY)
+    except Exception:
+        return None
+
+
+def _save_font_pref(font_family: str):
+    prefs = {}
+    try:
+        with _pref_path().open("r", encoding="utf-8") as f:
+            prefs = json.load(f)
+    except Exception:
+        pass
+    prefs[FONT_PREF_KEY] = font_family
+    with _pref_path().open("w", encoding="utf-8") as f:
+        json.dump(prefs, f, ensure_ascii=False, indent=2)
 
 
 def fetch_cn_indices(configs: list[dict] | None = None):
@@ -812,7 +845,29 @@ class FletApp:
         self.btn_tab_market = tab_btn("大盘行情", True, self.on_tab_market)
         self.btn_tab_fund_list = tab_btn("基金列表", False, self.on_tab_fund_list)
         self.btn_tab_fund = tab_btn("基金详情", False, self.on_tab_fund)
-        tabs_row = ft.Row([self.btn_tab_market, self.btn_tab_fund_list, self.btn_tab_fund], spacing=10)
+
+        self.dd_font = ft.Dropdown(
+            value=FONT_SANS,
+            options=[ft.dropdown.Option(key=k, text=v) for k, v in FONT_CHOICES.items()],
+            on_select=self._on_font_changed,
+            width=140,
+            height=36,
+            text_size=12,
+            content_padding=ft.Padding(8, 0, 4, 0),
+            border_radius=12,
+            border_color="#14000000",
+            bgcolor=SURFACE,
+            label="字体",
+            label_style=ft.TextStyle(size=10),
+        )
+        tabs_row = ft.Row(
+            [
+                ft.Row([self.btn_tab_market, self.btn_tab_fund_list, self.btn_tab_fund], spacing=10),
+                self.dd_font,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
         def module_card(content: ft.Control, *, padding: int = 14, expand: bool | int | None = None):
             return ft.Container(
@@ -1399,6 +1454,17 @@ class FletApp:
             stale = (datetime.now() - last_dt).total_seconds() >= float(MARKET_MIN_REFRESH_SECONDS)
         if stale:
             self.refresh_market_indices(e)
+
+    def _on_font_changed(self, e):
+        global FONT_SANS
+        new_font = e.control.value
+        FONT_SANS = new_font
+        self.page.theme = ft.Theme(font_family=new_font)
+        self.page.update()
+        try:
+            _save_font_pref(new_font)
+        except Exception:
+            LOGGER.exception("保存字体偏好失败")
 
     def open_fund_detail(self, code: str):
         # Switch to detail tab and select corresponding fund
@@ -2913,12 +2979,26 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     page.bgcolor = BG
 
+    # Register bundled NotoSansSC fonts
+    page.fonts = {
+        "NotoSansSC": "fonts/NotoSansSC-Regular.otf",
+        "NotoSansSC-Medium": "fonts/NotoSansSC-Medium.otf",
+        "NotoSansSC-Bold": "fonts/NotoSansSC-Bold.otf",
+    }
+
     try:
         icon_path = (Path(__file__).parent / "assets" / "icon.png").resolve()
         if icon_path.exists():
             page.window.icon = str(icon_path)
     except Exception:
         pass
+
+    # Load saved font preference
+    saved_font = _load_font_pref()
+    if saved_font and saved_font in FONT_CHOICES:
+        global FONT_SANS
+        FONT_SANS = saved_font
+
     app = FletApp(page)
 
 if __name__ == "__main__":
