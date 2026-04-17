@@ -75,6 +75,96 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("chart.getOption()", html)
         self.assertNotIn("assets.pyecharts.org", html)
 
+    def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
+        """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
+
+        约束：
+        - 必须存在独立的 ma-controls-row DOM 标识
+        - 必须包含 7 个固定候选 data-ma-day='5'..'250'
+        - 默认选中项应包含 is-selected 或 ma-check 等稳定类名
+        - 标题行与提示文案不应与 MA 胶囊混在同一个 toolbar-right 容器里
+        """
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
+
+        # 新布局关键 DOM 标识（尚未实现，测试应因此失败）
+        self.assertIn("ma-controls-row", html)
+
+        # 7 个固定候选存在
+        for day in [5, 10, 20, 30, 60, 120, 250]:
+            self.assertIn(f"data-ma-day='{day}'", html)
+
+        # 默认选中项应暴露稳定类名/标记
+        self.assertIn("is-selected", html)
+        self.assertIn("ma-check", html)
+
+        # 标题/提示文案不应和 MA 胶囊混在同一个右侧容器（旧实现中 toolbar-right 同时包含 ma-controls 与 hint）
+        self.assertNotIn("<div class='toolbar-right'><div class='ma-controls'", html)
+
+    def test_write_dynamic_chart_html_outputs_ma_controls_row_and_defaults(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            charts_dir = base_dir / "charts"
+            charts_dir.mkdir(parents=True, exist_ok=True)
+            assets_dir = base_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            bundled_asset = assets_dir / "echarts.min.js"
+            bundled_asset.write_text("// echarts runtime", encoding="utf-8")
+
+            with (
+                mock.patch.object(main, "_log_dir", return_value=base_dir),
+                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(
+                    main,
+                    "build_dynamic_chart_data",
+                    return_value=chart_data,
+                ),
+            ):
+                html_path = main.write_dynamic_chart_html(
+                    {"code": "110022", "label": "测试基金 (110022)", "type": "fund"}
+                )
+                html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+        self.assertIn("ma-controls-row", html)
+        # 默认应该仍有一些默认选中标识
+        self.assertIn("is-selected", html)
+        self.assertIn("data-ma-day='5'", html)
+
+    def test_get_chart_html_outputs_new_layout_contract(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+
+        with mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data) as mock_build:
+            html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
+
+        mock_build.assert_called_once_with("110022", "测试基金")
+        self.assertIn("ma-controls-row", html)
+        self.assertIn("data-ma-day='250'", html)
+        self.assertIn("is-selected", html)
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+
     def test_build_dynamic_chart_series_keeps_nav_when_no_ma_selected(self):
         chart_data = {
             "title": "测试基金 (110022) 净值走势",
