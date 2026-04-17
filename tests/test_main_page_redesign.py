@@ -2,6 +2,7 @@ import tempfile
 import types
 import unittest
 import json
+import re
 import sys
 from pathlib import Path
 from unittest import mock
@@ -101,12 +102,32 @@ class PageRedesignHelperTests(unittest.TestCase):
         for day in [5, 10, 20, 30, 60, 120, 250]:
             self.assertIn(f"data-ma-day='{day}'", html)
 
-        # 默认选中项应暴露稳定类名/标记
+        # 默认选中项应暴露稳定类名/标记，且仅对应默认周期 5/10/20/250
         self.assertIn("is-selected", html)
         self.assertIn("ma-check", html)
 
-        # 标题/提示文案不应和 MA 胶囊混在同一个右侧容器（旧实现中 toolbar-right 同时包含 ma-controls 与 hint）
-        self.assertNotIn("<div class='toolbar-right'><div class='ma-controls'", html)
+        # 标题/提示文案应位于 ma-controls-row 之前（MA 操作区为独立下一行）
+        title = chart_data["title"]
+        # 确保标题文本出现在 ma-controls-row 之前，并且中间由至少一个关闭标签分隔，说明是独立行
+        self.assertRegex(html, re.compile(re.escape(title) + r".+?</[^>]+>.+?ma-controls-row", re.S))
+        title_idx = html.find(title)
+        ma_idx = html.find("ma-controls-row")
+        self.assertTrue(title_idx != -1 and ma_idx != -1 and title_idx < ma_idx)
+
+        # 额外检查默认周期确实带有默认选中类
+        default_days = [5, 10, 20, 250]
+        for day in default_days:
+            idx = html.find(f"data-ma-day='{day}'")
+            self.assertNotEqual(idx, -1)
+            snippet = html[idx: idx + 300]
+            self.assertRegex(snippet, r"(is-selected|ma-check)")
+
+        # 非默认周期不应被误判为默认选中
+        for day in [30, 60, 120]:
+            idx = html.find(f"data-ma-day='{day}'")
+            if idx != -1:
+                snippet = html[idx: idx + 300]
+                self.assertNotRegex(snippet, r"(is-selected|ma-check)")
 
     def test_write_dynamic_chart_html_outputs_ma_controls_row_and_defaults(self):
         chart_data = {
