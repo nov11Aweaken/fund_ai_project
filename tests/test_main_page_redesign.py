@@ -2,11 +2,16 @@ import tempfile
 import types
 import unittest
 import json
+import sys
 from pathlib import Path
 from unittest import mock
 
 import flet as ft
 import pandas as pd
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import main
 from main import FletApp
@@ -46,18 +51,82 @@ class PageRedesignHelperTests(unittest.TestCase):
                     main._ensure_dynamic_chart_asset(output_dir)
 
     def test_build_dynamic_chart_document_uses_local_echarts_script_and_full_height_layout(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {"5": [None, None], "10": [None, None], "20": [None, None], "30": [None, None], "60": [None, None], "120": [None, None], "250": [None, None]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
         html = main.build_dynamic_chart_document(
-            title="测试基金 (110022) 净值走势",
-            option_json='{"series": [], "xAxis": []}',
+            chart_data=chart_data,
             script_src="echarts.min.js",
         )
 
         self.assertIn('<script src="echarts.min.js"></script>', html)
         self.assertIn("height:100vh", html)
         self.assertIn("echarts.init", html)
+        self.assertIn("data-ma-day='5'", html)
+        self.assertIn("MA250", html)
+        self.assertIn("const chartData =", html)
+        self.assertIn("function buildOption(selectedDays)", html)
+        self.assertIn("function mergeCurrentZoom(option)", html)
+        self.assertIn("chart.getOption()", html)
         self.assertNotIn("assets.pyecharts.org", html)
 
+    def test_build_dynamic_chart_series_keeps_nav_when_no_ma_selected(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {"5": [None, None], "10": [None, None]},
+            "ma_candidates": [5, 10],
+            "default_ma_days": [5],
+        }
+
+        series = main.build_dynamic_chart_series(chart_data, [])
+
+        self.assertEqual([item["name"] for item in series], ["单位净值"])
+        self.assertEqual(series[0]["data"], [1.0, 1.1])
+
+    def test_build_dynamic_chart_option_uses_selected_ma_series(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02", "2023-01-03"],
+            "nav_values": [1.0, 1.1, 1.2],
+            "ma_series": {
+                "5": [None, None, None],
+                "10": [None, None, None],
+                "20": [None, None, None],
+            },
+            "ma_candidates": [5, 10, 20],
+            "default_ma_days": [5, 10],
+        }
+
+        option = main.build_dynamic_chart_option(chart_data, [10, 5])
+
+        self.assertEqual(option["legend"]["data"], ["单位净值", "MA10", "MA5"])
+        self.assertEqual([item["name"] for item in option["series"]], ["单位净值", "MA10", "MA5"])
+        self.assertEqual(option["xAxis"]["data"], chart_data["dates"])
+
     def test_write_dynamic_chart_html_writes_html_that_uses_local_echarts_script(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {
+                "5": [None, None],
+                "10": [None, None],
+                "20": [None, None],
+                "30": [None, None],
+                "60": [None, None],
+                "120": [None, None],
+                "250": [None, None],
+            },
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             charts_dir = base_dir / "charts"
@@ -72,11 +141,8 @@ class PageRedesignHelperTests(unittest.TestCase):
                 mock.patch.object(main, "_app_dir", return_value=base_dir),
                 mock.patch.object(
                     main,
-                    "build_dynamic_chart_options",
-                    return_value={
-                        "title": "测试基金 (110022) 净值走势",
-                        "option_json": '{"series": [], "xAxis": []}',
-                    },
+                    "build_dynamic_chart_data",
+                    return_value=chart_data,
                 ),
             ):
                 html_path = main.write_dynamic_chart_html(
@@ -85,7 +151,35 @@ class PageRedesignHelperTests(unittest.TestCase):
                 html = html_path.read_text(encoding="utf-8")
 
         self.assertIn('<script src="echarts.min.js"></script>', html)
+        self.assertIn("data-ma-day='5'", html)
+        self.assertIn("const defaultOption =", html)
         self.assertNotIn("assets.pyecharts.org", html)
+
+    def test_get_chart_html_uses_structured_dynamic_chart_contract(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {
+                "5": [None, None],
+                "10": [None, None],
+                "20": [None, None],
+                "30": [None, None],
+                "60": [None, None],
+                "120": [None, None],
+                "250": [None, None],
+            },
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+
+        with mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data) as mock_build:
+            html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
+
+        mock_build.assert_called_once_with("110022", "测试基金")
+        self.assertIn("data-ma-day='250'", html)
+        self.assertIn("const chartData =", html)
+        self.assertIn('<script src="echarts.min.js"></script>', html)
 
     def test_open_dynamic_kline_shows_message_when_browser_open_returns_false(self):
         messages: list[str] = []

@@ -526,6 +526,72 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
     }
 
 
+def build_dynamic_chart_series(chart_data: dict, selected_days: list[int]) -> list[dict]:
+    ma_candidates = {int(day) for day in chart_data["ma_candidates"]}
+    normalized_days: list[int] = []
+    for day in selected_days:
+        try:
+            day_value = int(day)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"MA 周期无效: {day}") from exc
+        if day_value not in ma_candidates:
+            raise ValueError(f"不支持的 MA 周期: {day_value}")
+        if day_value not in normalized_days:
+            normalized_days.append(day_value)
+
+    series = [
+        {
+            "name": "单位净值",
+            "type": "line",
+            "data": chart_data["nav_values"],
+            "showSymbol": False,
+            "smooth": False,
+            "lineStyle": {"width": 2.5, "color": ACCENT},
+        }
+    ]
+    for day in normalized_days:
+        ma_values = chart_data["ma_series"].get(str(day))
+        if ma_values is None:
+            raise ValueError(f"缺少 MA{day} 数据")
+        series.append(
+            {
+                "name": f"MA{day}",
+                "type": "line",
+                "data": ma_values,
+                "showSymbol": False,
+                "smooth": True,
+                "lineStyle": {"width": 1.2},
+            }
+        )
+    return series
+
+
+def build_dynamic_chart_option(chart_data: dict, selected_days: list[int]) -> dict:
+    series = build_dynamic_chart_series(chart_data, selected_days)
+    return {
+        "animation": False,
+        "legend": {
+            "top": "2%",
+            "data": [item["name"] for item in series],
+        },
+        "tooltip": {"trigger": "axis"},
+        "toolbox": {"feature": {"saveAsImage": {}}},
+        "dataZoom": [
+            {"type": "inside", "start": 75, "end": 100},
+            {"type": "slider", "start": 75, "end": 100, "bottom": "2%"},
+        ],
+        "grid": {"left": 56, "right": 28, "top": 70, "bottom": 78},
+        "xAxis": {
+            "type": "category",
+            "boundaryGap": False,
+            "data": chart_data["dates"],
+            "axisLabel": {"rotate": 35},
+        },
+        "yAxis": {"type": "value", "scale": True},
+        "series": series,
+    }
+
+
 def render_fund_nav_png_bytes(code: str) -> bytes:
     df = fetch_fund_history_data(code)
     dates = df["净值日期"]
@@ -599,70 +665,30 @@ def _ensure_dynamic_chart_asset(output_dir: Path) -> Path:
 
 
 def build_dynamic_chart_options(code: str, name: str = "") -> dict:
-    try:
-        df = fetch_fund_history_data(code)
-        df = df.copy()
-        df["单位净值"] = df["单位净值"].astype(float)
-    except Exception as exc:
-        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
-
-    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist()
-    values = df["单位净值"].tolist()
-    if not dates or not values:
-        raise ValueError("动态K线图历史数据为空")
-
-    title_name = (name or "").strip() or code
-    ma_days = [5, 10, 20, 250]
-    ma_lines: list[tuple[int, list[float | None]]] = []
-    for days in ma_days:
-        ma = df["单位净值"].rolling(window=days).mean()
-        ma_lines.append((days, ma.where(pd.notnull(ma), None).tolist()))
-
-    chart = (
-        Line()
-        .add_xaxis(dates)
-        .add_yaxis(
-            "单位净值",
-            values,
-            is_symbol_show=False,
-            label_opts=opts.LabelOpts(is_show=False),
-            linestyle_opts=opts.LineStyleOpts(width=2.5, color=ACCENT),
-        )
-    )
-    for days, ma_values in ma_lines:
-        chart.add_yaxis(
-            f"MA{days}",
-            ma_values,
-            is_symbol_show=False,
-            is_smooth=True,
-            label_opts=opts.LabelOpts(is_show=False),
-            linestyle_opts=opts.LineStyleOpts(width=1.2),
-        )
-
-    chart.set_global_opts(
-        title_opts=opts.TitleOpts(title=f"{title_name} ({code}) 净值走势"),
-        legend_opts=opts.LegendOpts(pos_top="4%"),
-        tooltip_opts=opts.TooltipOpts(trigger="axis"),
-        datazoom_opts=[
-            opts.DataZoomOpts(type_="inside", range_start=75, range_end=100),
-            opts.DataZoomOpts(type_="slider", range_start=75, range_end=100, pos_bottom="2%"),
-        ],
-        xaxis_opts=opts.AxisOpts(
-            type_="category",
-            boundary_gap=False,
-            axislabel_opts=opts.LabelOpts(rotate=35),
-        ),
-        yaxis_opts=opts.AxisOpts(type_="value", is_scale=True),
-    )
+    chart_data = build_dynamic_chart_data(code, name)
+    option = build_dynamic_chart_option(chart_data, chart_data["default_ma_days"])
     return {
-        "title": f"{title_name} ({code}) 净值走势",
-        "option_json": chart.dump_options(),
+        "title": chart_data["title"],
+        "option_json": json.dumps(option, ensure_ascii=False),
     }
 
 
-def build_dynamic_chart_document(title: str, option_json: str, script_src: str) -> str:
-    safe_title = escape(title, quote=True)
+def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
+    safe_title = escape(str(chart_data["title"]), quote=True)
     safe_script_src = escape(script_src, quote=True)
+    default_option_json = json.dumps(
+        build_dynamic_chart_option(chart_data, chart_data["default_ma_days"]),
+        ensure_ascii=False,
+    )
+    chart_data_json = json.dumps(chart_data, ensure_ascii=False)
+    controls_html = "".join(
+        (
+            f"<label class='ma-chip'><input type='checkbox' data-ma-day='{day}' value='{day}'"
+            f"{' checked' if day in chart_data['default_ma_days'] else ''}>"
+            f"<span>MA{day}</span></label>"
+        )
+        for day in chart_data["ma_candidates"]
+    )
     return (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -673,21 +699,67 @@ def build_dynamic_chart_document(title: str, option_json: str, script_src: str) 
         "body{font-family:'Microsoft YaHei UI','Segoe UI',sans-serif;color:#111827;}"
         ".page{height:100vh;display:flex;flex-direction:column;padding:16px;box-sizing:border-box;gap:12px;}"
         ".toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}"
+        ".toolbar-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end;}"
         ".title{font-size:18px;font-weight:700;}"
         ".hint{font-size:12px;color:#6B7280;}"
+        ".ma-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}"
+        ".ma-label{font-size:12px;color:#6B7280;font-weight:600;}"
+        ".ma-chip{display:inline-flex;align-items:center;gap:4px;padding:6px 10px;border-radius:999px;"
+        "background:#E5E7EB;font-size:12px;color:#111827;cursor:pointer;}"
+        ".ma-chip input{margin:0;cursor:pointer;}"
         ".chart-card{flex:1;min-height:420px;background:#FFFFFF;border-radius:16px;"
         "box-shadow:0 8px 24px rgba(15,23,42,.08);padding:12px;box-sizing:border-box;}"
         "#dynamic-chart{width:100%;height:100%;}"
         "</style></head><body>"
         "<div class='page'>"
         f"<div class='toolbar'><div class='title'>{safe_title}</div>"
-        "<div class='hint'>支持缩放、悬浮提示和图片导出</div></div>"
+        "<div class='toolbar-right'><div class='ma-controls'><span class='ma-label'>均线</span>"
+        f"{controls_html}</div><div class='hint'>支持缩放、悬浮提示和图片导出</div></div></div>"
         "<div class='chart-card'><div id='dynamic-chart'></div></div>"
         "</div>"
         "<script>"
+        f"const chartData = {chart_data_json};"
+        f"const defaultOption = {default_option_json};"
         "const chart = echarts.init(document.getElementById('dynamic-chart'), 'white', {renderer: 'canvas', locale: 'ZH'});"
-        f"const option = {option_json};"
-        "chart.setOption(option);"
+        "const maInputs = Array.from(document.querySelectorAll('[data-ma-day]'));"
+        "function buildSeries(selectedDays) {"
+        "const series = [{name:'单位净值',type:'line',data:chartData.nav_values,showSymbol:false,smooth:false,lineStyle:{width:2.5,color:'"
+        f"{ACCENT}"
+        "'}}];"
+        "selectedDays.forEach((day) => {"
+        "const key = String(day);"
+        "const values = chartData.ma_series[key];"
+        "if (!values) { return; }"
+        "series.push({name:`MA${day}`,type:'line',data:values,showSymbol:false,smooth:true,lineStyle:{width:1.2}});"
+        "});"
+        "return series;"
+        "}"
+        "function buildOption(selectedDays) {"
+        "const series = buildSeries(selectedDays);"
+        "return {...defaultOption,legend:{...defaultOption.legend,data:series.map((item) => item.name)},series};"
+        "}"
+        "function mergeCurrentZoom(option) {"
+        "const currentOption = chart.getOption();"
+        "const currentZoom = Array.isArray(currentOption.dataZoom) ? currentOption.dataZoom : [];"
+        "if (!currentZoom.length) { return option; }"
+        "return {...option,dataZoom:option.dataZoom.map((item, index) => {"
+        "const current = currentZoom[index] || {};"
+        "const nextItem = {...item};"
+        "if (current.start != null) { nextItem.start = current.start; }"
+        "if (current.end != null) { nextItem.end = current.end; }"
+        "if (current.startValue != null) { nextItem.startValue = current.startValue; }"
+        "if (current.endValue != null) { nextItem.endValue = current.endValue; }"
+        "return nextItem;"
+        "})};"
+        "}"
+        "function getSelectedDays() {"
+        "return maInputs.filter((input) => input.checked).map((input) => Number(input.value));"
+        "}"
+        "function renderChart() {"
+        "chart.setOption(mergeCurrentZoom(buildOption(getSelectedDays())), true);"
+        "}"
+        "chart.setOption(defaultOption);"
+        "maInputs.forEach((input) => input.addEventListener('change', renderChart));"
         "window.addEventListener('resize', () => chart.resize());"
         "</script></body></html>"
     )
@@ -701,12 +773,8 @@ def write_dynamic_chart_html(tgt: dict) -> Path:
     out_dir = _log_dir() / "charts"
     out_dir.mkdir(parents=True, exist_ok=True)
     asset_path = _ensure_dynamic_chart_asset(out_dir)
-    chart_data = build_dynamic_chart_options(code, name)
-    html = build_dynamic_chart_document(
-        title=str(chart_data["title"]),
-        option_json=str(chart_data["option_json"]),
-        script_src=asset_path.name,
-    )
+    chart_data = build_dynamic_chart_data(code, name)
+    html = build_dynamic_chart_document(chart_data, asset_path.name)
     out = out_dir / f"dynamic_{str(tgt.get('type') or 'fund').strip()}_{code}.html"
     out.write_text(html, encoding="utf-8")
     return out
@@ -714,12 +782,8 @@ def write_dynamic_chart_html(tgt: dict) -> Path:
 
 
 def get_chart_html(code: str, name: str = "", script_src: str = "echarts.min.js"):
-    chart_data = build_dynamic_chart_options(code, name)
-    return build_dynamic_chart_document(
-        title=str(chart_data["title"]),
-        option_json=str(chart_data["option_json"]),
-        script_src=script_src,
-    )
+    chart_data = build_dynamic_chart_data(code, name)
+    return build_dynamic_chart_document(chart_data, script_src)
 
 
 class FletApp:
