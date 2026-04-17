@@ -259,6 +259,15 @@ class PageRedesignHelperTests(unittest.TestCase):
 
         self.assertEqual(res["title"], "测试基金 (110022) 净值走势")
 
+    def test_build_dynamic_chart_data_uses_code_only_title_when_name_missing(self):
+        dates = pd.date_range(end=pd.Timestamp("2023-01-10"), periods=10)
+        df = pd.DataFrame({"净值日期": dates, "单位净值": list(range(1, 11))})
+
+        with mock.patch.object(main, "fetch_fund_history_data", return_value=df):
+            res = main.build_dynamic_chart_data("110022", "")
+
+        self.assertEqual(res["title"], "110022 净值走势")
+
     def test_build_dynamic_chart_data_raises_when_history_is_empty(self):
         empty_df = pd.DataFrame({
             "净值日期": pd.Series(dtype="datetime64[ns]"),

@@ -514,8 +514,10 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
                 series.append(float(value))
         ma_series[str(days)] = series
 
+    title = f"{code} 净值走势" if title_name == code else f"{title_name} ({code}) 净值走势"
+
     return {
-        "title": f"{title_name} ({code}) 净值走势",
+        "title": title,
         "dates": dates,
         "nav_values": [float(value) for value in nav_values],
         "ma_series": ma_series,
