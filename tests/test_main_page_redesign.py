@@ -341,6 +341,22 @@ class PageRedesignHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "动态K线图历史数据为空"):
                 main.build_dynamic_chart_data("110022", "测试基金")
 
+    def test_build_dynamic_chart_document_escapes_script_variants(self):
+        """回归测试：确保嵌入到 inline <script> 的 JSON 中无法形成结束标签，无论大小写。"""
+        mixed = '</ScRiPt><script>alert(1)</script>'
+        lower = '</script><script>alert(2)</script>'
+        # Build option_json containing the mixed-case payload inside a string value
+        option_json = json.dumps({"series": [], "xAxis": [], "title": mixed})
+        html = main.build_dynamic_chart_document(title="safe", option_json=option_json, script_src="echarts.min.js")
+
+        # 原始恶意 payload 不应直接出现在生成的 HTML 中
+        self.assertNotIn(mixed, html)
+        self.assertNotIn(lower, html)
+        # 不应出现任意大小写组合的 </script>
+        self.assertIsNone(re.search(r'</script>', html, re.I))
+        # 确认 JSON 中的 '<' 被转义为 unicode 转义序列，防止标签形成
+        self.assertIn('\\u003c', html)
+
 
 if __name__ == "__main__":
     unittest.main()

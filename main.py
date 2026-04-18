@@ -695,6 +695,22 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
     }
 
 
+def _safe_json_for_embedding(json_text: str) -> str:
+    """
+    Escape characters in a JSON string representation so it is safe to embed inside an
+    inline <script> tag. Replaces troublesome characters with their unicode escape
+    sequences so constructs like </script> (in any casing) cannot form inside the HTML.
+    Operates on the textual JSON representation (no parsing) and returns a string safe
+    to place directly into a JS context.
+    """
+    if not isinstance(json_text, str):
+        json_text = str(json_text)
+    # Replace characters that could begin or complete HTML tags or entities.
+    # Using unicode escapes (e.g. \u003c) prevents browsers from interpreting
+    # the characters as markup while remaining valid JSON/JS.
+    return json_text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def build_dynamic_chart_document(title: str, option_json: str, script_src: str) -> str:
     safe_title = escape(title, quote=True)
     safe_script_src = escape(script_src, quote=True)
@@ -746,7 +762,7 @@ def build_dynamic_chart_document(title: str, option_json: str, script_src: str) 
         "</div>"
         "<script>"
         "const chart = echarts.init(document.getElementById('dynamic-chart'), 'white', {renderer: 'canvas', locale: 'ZH'});"
-        f"const option = {option_json};"
+        f"const option = {safe_option_json};"
         "chart.setOption(option);"
         "window.addEventListener('resize', () => chart.resize());"
         "// Keep MA chip DOM state in sync with checkbox state on every change\n"
