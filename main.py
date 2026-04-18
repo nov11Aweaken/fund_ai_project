@@ -683,8 +683,10 @@ def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
     chart_data_json = json.dumps(chart_data, ensure_ascii=False)
     controls_html = "".join(
         (
-            f"<label class='ma-chip'><input type='checkbox' data-ma-day='{day}' value='{day}'"
+            f"<label class='ma-chip{' is-selected' if day in chart_data['default_ma_days'] else ''}'>"
+            f"<input type='checkbox' data-ma-day='{day}' value='{day}'"
             f"{' checked' if day in chart_data['default_ma_days'] else ''}>"
+            f"{'<span class=\'ma-check\'>✓</span>' if day in chart_data['default_ma_days'] else ''}"
             f"<span>MA{day}</span></label>"
         )
         for day in chart_data["ma_candidates"]
@@ -702,19 +704,21 @@ def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
         ".toolbar-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end;}"
         ".title{font-size:18px;font-weight:700;}"
         ".hint{font-size:12px;color:#6B7280;}"
+        ".ma-controls-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}"
         ".ma-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}"
         ".ma-label{font-size:12px;color:#6B7280;font-weight:600;}"
-        ".ma-chip{display:inline-flex;align-items:center;gap:4px;padding:6px 10px;border-radius:999px;"
+        ".ma-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;"
         "background:#E5E7EB;font-size:12px;color:#111827;cursor:pointer;}"
         ".ma-chip input{margin:0;cursor:pointer;}"
+        ".ma-chip.is-selected{background:#2196F3;color:#ffffff;}"
+        ".ma-check{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:11px;margin-right:4px;}"
         ".chart-card{flex:1;min-height:420px;background:#FFFFFF;border-radius:16px;"
         "box-shadow:0 8px 24px rgba(15,23,42,.08);padding:12px;box-sizing:border-box;}"
         "#dynamic-chart{width:100%;height:100%;}"
         "</style></head><body>"
         "<div class='page'>"
-        f"<div class='toolbar'><div class='title'>{safe_title}</div>"
-        "<div class='toolbar-right'><div class='ma-controls'><span class='ma-label'>均线</span>"
-        f"{controls_html}</div><div class='hint'>支持缩放、悬浮提示和图片导出</div></div></div>"
+        f"<div class='toolbar'><div class='title'>{safe_title}</div><div class='toolbar-right'><div class='hint'>支持缩放、悬浮提示和图片导出</div></div></div>"
+        f"<div class='ma-controls-row'><div class='ma-controls'><span class='ma-label'>均线</span>{controls_html}</div></div>"
         "<div class='chart-card'><div id='dynamic-chart'></div></div>"
         "</div>"
         "<script>"

@@ -20,17 +20,22 @@ from main import FletApp
 
 class PageRedesignHelperTests(unittest.TestCase):
     def _extract_label_block(self, html: str, day: int) -> str:
-        """Extract a single <label ...>...</label> block that contains an input[data-ma-day='X'].
+        """Extract a single <label ...>...</label> block that contains an <input ... data-ma-day='X'].
         Raises AssertionError if not found or not unique.
         """
-        # find all <label>...</label> blocks that contain an <input ... data-ma-day='day' ...>
-        pattern = re.compile(rf"(<label\b[^>]*>[\s\S]*?<input\b[^>]*data-ma-day=['\"]{day}['\"][^>]*>[\s\S]*?</label>)", re.I)
-        matches = pattern.findall(html)
-        if not matches:
+        # extract individual <label>...</label> blocks (non-greedy) and then find the one containing the requested input
+        label_pattern = re.compile(r"<label\b[^>]*>[\s\S]*?</label>", re.I)
+        candidates = label_pattern.findall(html)
+        # filter candidate blocks that contain the specific input[data-ma-day='{day}']
+        results = [
+            block for block in candidates
+            if re.search(rf"<input\b[^>]*\bdata-ma-day\s*=\s*['\"]{day}['\"]", block)
+        ]
+        if not results:
             raise AssertionError(f"label block containing input[data-ma-day='{day}'] not found")
-        if len(matches) != 1:
-            raise AssertionError(f"expected exactly one label block for data-ma-day='{day}', found {len(matches)}")
-        return matches[0]
+        if len(results) != 1:
+            raise AssertionError(f"expected exactly one label block for data-ma-day='{day}', found {len(results)}")
+        return results[0]
 
     def _assert_dynamic_kline_ma_layout_contract(self, html: str, chart_data: dict):
         """Assert the page contains the new MA controls layout and default selections.
