@@ -73,6 +73,10 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("height:100vh", html)
         self.assertIn("echarts.init", html)
         self.assertNotIn("assets.pyecharts.org", html)
+        # Ensure MA chips and sync logic are present in the generated document
+        self.assertIn('ma-chip', html)
+        self.assertIn('ma-check', html)
+        self.assertIn("addEventListener('change'", html)
 
     def test_write_dynamic_chart_html_writes_html_that_uses_local_echarts_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -698,7 +698,25 @@ def build_dynamic_chart_data(code: str, name: str = "") -> dict:
 def build_dynamic_chart_document(title: str, option_json: str, script_src: str) -> str:
     safe_title = escape(title, quote=True)
     safe_script_src = escape(script_src, quote=True)
-    return (
+
+    # MA candidates and defaults (7 candidates, defaults include 5/10/20/250)
+    ma_candidates = [5, 10, 20, 30, 60, 120, 250]
+    default_checked = {5, 10, 20, 250}
+
+    # Build MA chips HTML
+    ma_labels = []
+    for d in ma_candidates:
+        checked_attr = " checked" if d in default_checked else ""
+        sel_cls = " is-selected" if d in default_checked else ""
+        check_span = "<span class='ma-check'>✓</span>" if d in default_checked else ""
+        ma_labels.append(
+            f"<label class='ma-chip{sel_cls}' data-ma-day='{d}'>"
+            f"<input type='checkbox' data-ma-day='{d}'{checked_attr}>MA{d}"
+            f"{check_span}</label>"
+        )
+    ma_controls_html = "".join(ma_labels)
+
+    html = (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{safe_title}</title>"
@@ -713,10 +731,17 @@ def build_dynamic_chart_document(title: str, option_json: str, script_src: str) 
         ".chart-card{flex:1;min-height:420px;background:#FFFFFF;border-radius:16px;"
         "box-shadow:0 8px 24px rgba(15,23,42,.08);padding:12px;box-sizing:border-box;}"
         "#dynamic-chart{width:100%;height:100%;}"
+        "/* MA chips styling */"
+        ".ma-controls-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;margin-bottom:6px;}"
+        ".ma-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:#F5F7FA;color:#374151;font-size:13px;user-select:none;}"
+        ".ma-chip.is-selected{background:#2196F3;color:#fff;}"
+        ".ma-chip .ma-check{margin-left:8px;font-weight:700;}"
         "</style></head><body>"
         "<div class='page'>"
         f"<div class='toolbar'><div class='title'>{safe_title}</div>"
         "<div class='hint'>支持缩放、悬浮提示和图片导出</div></div>"
+        # Place MA controls between toolbar and chart so layout remains stable
+        f"<div class='ma-controls-row'>{ma_controls_html}</div>"
         "<div class='chart-card'><div id='dynamic-chart'></div></div>"
         "</div>"
         "<script>"
@@ -724,8 +749,29 @@ def build_dynamic_chart_document(title: str, option_json: str, script_src: str) 
         f"const option = {option_json};"
         "chart.setOption(option);"
         "window.addEventListener('resize', () => chart.resize());"
+        "// Keep MA chip DOM state in sync with checkbox state on every change\n"
+        "function syncMaChip(input){\n"
+        "  const label = input.closest('label.ma-chip');\n"
+        "  if(!label) return;\n"
+        "  if(input.checked){\n"
+        "    label.classList.add('is-selected');\n"
+        "    if(!label.querySelector('.ma-check')){\n"
+        "      const s = document.createElement('span'); s.className='ma-check'; s.textContent='✓'; label.appendChild(s);\n"
+        "    }\n"
+        "  } else {\n"
+        "    label.classList.remove('is-selected');\n"
+        "    const c = label.querySelector('.ma-check'); if(c) c.remove();\n"
+        "  }\n"
+        "}\n"
+        "// Attach listeners to all MA inputs and run initial sync to ensure DOM matches checked attributes\n"
+        "document.querySelectorAll('label.ma-chip input[type=checkbox]').forEach(function(inp){\n"
+        "  inp.addEventListener('change', function(){ syncMaChip(this); });\n"
+        "  // initial sync in case unchecked inputs were rendered without consistent DOM\n"
+        "  syncMaChip(inp);\n"
+        "});\n"
         "</script></body></html>"
     )
+    return html
 
 
 def write_dynamic_chart_html(tgt: dict) -> Path:
