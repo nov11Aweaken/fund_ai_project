@@ -137,11 +137,21 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertNotIn("assets.pyecharts.org", html)
         # static JS assertions: ensure MA chip sync helper and DOM ops are present
         self.assertIn("function syncMaChipState", html)
+        self.assertIn("syncMaChipStates();", html)
         self.assertRegex(html, r"classList\.(?:add|remove)\(")
         self.assertRegex(html, r"\.ma-check\b")
         # event listener should no longer be the old simple form that only referenced renderChart
         self.assertNotIn("addEventListener('change', renderChart)", html)
         self.assertIn("addEventListener('change',", html)
+
+        # new: ensure the change listener performs a sync before rendering
+        # assert callback body includes syncMaChipState(input) and renderChart()
+        self.assertIn("syncMaChipState(input)", html)
+        self.assertIn("renderChart()", html)
+        # assert ordering: syncMaChipState appears before renderChart inside the HTML/JS
+        sync_idx = html.find("syncMaChipState(input)")
+        render_idx = html.find("renderChart()")
+        self.assertTrue(sync_idx != -1 and render_idx != -1 and sync_idx < render_idx, "change listener should call syncMaChipState before renderChart")
 
     def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
         """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
