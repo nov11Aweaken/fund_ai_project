@@ -140,6 +140,7 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("syncMaChipStates();", html)
         self.assertRegex(html, r"classList\.(?:add|remove)\(")
         self.assertRegex(html, r"\.ma-check\b")
+        self.assertIn("chart.setOption(defaultOption);syncMaChipStates();maInputs.forEach(", html)
         # event listener should no longer be the old simple form that only referenced renderChart
         self.assertNotIn("addEventListener('change', renderChart)", html)
         self.assertIn("addEventListener('change',", html)

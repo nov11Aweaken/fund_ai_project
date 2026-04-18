@@ -786,7 +786,6 @@ def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
         "chart.setOption(mergeCurrentZoom(buildOption(getSelectedDays())), true);"
         "}"
         "chart.setOption(defaultOption);"
-        "// ensure DOM selection state reflects input.checked on load"
         "syncMaChipStates();"
         "maInputs.forEach((input) => input.addEventListener('change', (e) => { syncMaChipState(input); renderChart(); }));"
         "window.addEventListener('resize', () => chart.resize());"
