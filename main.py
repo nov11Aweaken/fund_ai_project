@@ -676,11 +676,14 @@ def build_dynamic_chart_options(code: str, name: str = "") -> dict:
 def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
     safe_title = escape(str(chart_data["title"]), quote=True)
     safe_script_src = escape(script_src, quote=True)
-    default_option_json = json.dumps(
+    def _safe_json_for_embedding(s: str) -> str:
+        # prevent closing the script tag and HTML comment injection when embedding JSON in inline JS
+        return s.replace("</script>", "<\\/script>").replace("<!--", "<\\!--")
+    default_option_json = _safe_json_for_embedding(json.dumps(
         build_dynamic_chart_option(chart_data, chart_data["default_ma_days"]),
         ensure_ascii=False,
-    )
-    chart_data_json = json.dumps(chart_data, ensure_ascii=False)
+    ))
+    chart_data_json = _safe_json_for_embedding(json.dumps(chart_data, ensure_ascii=False))
     controls_html = "".join(
         (
             f"<label class='ma-chip{' is-selected' if day in chart_data['default_ma_days'] else ''}'>"
@@ -780,7 +783,6 @@ def build_dynamic_chart_document(chart_data: dict, script_src: str) -> str:
         "function renderChart() {"
         "chart.setOption(mergeCurrentZoom(buildOption(getSelectedDays())), true);"
         "}"
-        "chart.setOption(defaultOption);"
         "chart.setOption(defaultOption);"
         "// ensure DOM selection state reflects input.checked on load"
         "syncMaChipStates();"

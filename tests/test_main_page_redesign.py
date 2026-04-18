@@ -145,13 +145,29 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("addEventListener('change',", html)
 
         # new: ensure the change listener performs a sync before rendering
-        # assert callback body includes syncMaChipState(input) and renderChart()
-        self.assertIn("syncMaChipState(input)", html)
-        self.assertIn("renderChart()", html)
-        # assert ordering: syncMaChipState appears before renderChart inside the HTML/JS
-        sync_idx = html.find("syncMaChipState(input)")
-        render_idx = html.find("renderChart()")
+        # locate the change listener callback body and assert sync happens before render
+        m = re.search(r"addEventListener\(\s*['\"]change['\"]\s*,\s*\(?\w*\)?\s*=>\s*\{([\s\S]*?)\}\s*\)", html)
+        self.assertIsNotNone(m, "change event listener callback not found")
+        body = m.group(1)
+        sync_idx = body.find("syncMaChipState(")
+        render_idx = body.find("renderChart(")
         self.assertTrue(sync_idx != -1 and render_idx != -1 and sync_idx < render_idx, "change listener should call syncMaChipState before renderChart")
+
+    def test_build_dynamic_chart_document_escapes_closing_script(self):
+        # Ensure malicious titles containing </script> do not break the inline script
+        chart_data = {
+            "title": "x</script><script>alert(1)</script>",
+            "dates": ["2023-01-01"],
+            "nav_values": [1.0],
+            "ma_series": {str(k): [None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
+        # raw payload should not appear unescaped
+        self.assertNotIn("</script><script>alert(1)</script>", html)
+        # Expect only the external script close and the inline script close
+        self.assertEqual(html.count("</script>"), 2)
 
     def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
         """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
