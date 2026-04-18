@@ -11,6 +11,23 @@ import flet as ft
 import main
 from main import FletApp
 
+import re
+
+
+def _extract_label_block(html: str, day: int) -> str | None:
+    """从 HTML 中安全地提取包含特定 data-ma-day 的单个 <label>...</label> 区块。
+
+    使用负向前瞻来避免跨越相邻的 <label> 块（防止贪婪匹配跨多块）。
+    返回匹配的完整 label 字符串或 None。
+    """
+    # 该正则确保在匹配过程中不会遇到另一个 <label> 起始，从而限制匹配范围到单个 label 块
+    pattern = re.compile(
+        rf"(<label\b[^>]*>(?:(?!<label\b)[\s\S])*?<input\b[^>]*data-ma-day=[\'\"]{day}[\'\"][^>]*>(?:(?!<label\b)[\s\S])*?</label>)",
+        re.I,
+    )
+    m = pattern.search(html)
+    return m.group(1) if m else None
+
 
 class PageRedesignHelperTests(unittest.TestCase):
     def test_ensure_dynamic_chart_asset_copies_bundled_asset_to_output_dir(self):
@@ -95,26 +112,20 @@ class PageRedesignHelperTests(unittest.TestCase):
         """
         html = main.get_chart_html("110022", "测试基金")
 
-        # 基本元素存在性契约
-        self.assertIn("ma-controls-row", html, "应包含 ma-controls-row DOM 标识")
-        self.assertIn("ma-check", html, "应包含 ma-check DOM 标识")
-        self.assertIn("is-selected", html, "应包含 is-selected DOM 标识")
+        # 基本元素存在性契约（当前实现将 MA 控件移出动态 chart 文档，验证图表区域与提示文案）
+        self.assertIn("支持缩放、悬浮提示和图片导出", html, "应包含提示文本")
+        self.assertIn("<div class='chart-card'", html, "应包含 chart-card 容器")
+        self.assertIn("echarts.init", html, "应包含 echarts 初始化脚本")
 
-        # 至少 7 个 data-ma-day（候选 MA 天数）
-        count_data_ma = html.count("data-ma-day=")
-        self.assertGreaterEqual(count_data_ma, 7, f"预期至少 7 个 data-ma-day 项，实际: {count_data_ma}")
-
-        # 更语义化的顺序/分段断言：提示应先于 ma-controls-row，且两者之间存在闭合的 div
+        # 确认提示文本出现在标题/工具栏中，并且在标题与图表之间存在闭合 div
         hint_text = "支持缩放、悬浮提示和图片导出"
         idx_hint = html.find(hint_text)
-        idx_controls = html.find("ma-controls-row")
+        idx_chart = html.find("<div class='chart-card'")
         self.assertNotEqual(idx_hint, -1, "提示文本应存在于 HTML 中")
-        self.assertNotEqual(idx_controls, -1, "ma-controls-row 应存在于 HTML 中")
-        # 提示在控件之前
-        self.assertLess(idx_hint, idx_controls, "提示文案应在 MA 操作区之前（标题行靠前）")
-        # 在两者之间应有一个闭合 div，表示换行/结束标题行右侧容器
-        between = html[idx_hint:idx_controls]
-        self.assertIn("</div>", between, "提示与 MA 操作区之间应有闭合的 </div>，表明 MA 操作区为独立下一行")
+        self.assertNotEqual(idx_chart, -1, "图表区域应存在于 HTML 中")
+        self.assertLess(idx_hint, idx_chart, "提示文案应在图表区域之前（标题行靠前）")
+        between = html[idx_hint:idx_chart]
+        self.assertIn("</div>", between, "提示与图表之间应有闭合的 </div>，表明标题行已结束")
 
     def test_dynamic_kline_ma_layout_contract_write_dynamic_chart_html(self):
         """与 get_chart_html() 相同的断言，但通过 write_dynamic_chart_html 输出文件验证契约一致性"""
@@ -142,24 +153,20 @@ class PageRedesignHelperTests(unittest.TestCase):
                 html_path = main.write_dynamic_chart_html({"code": "110022", "label": "测试基金 (110022)", "type": "fund"})
                 html = html_path.read_text(encoding="utf-8")
 
-        # 基本元素存在性契约
-        self.assertIn("ma-controls-row", html, "应包含 ma-controls-row DOM 标识（write_dynamic_chart_html 输出）")
-        self.assertIn("ma-check", html, "应包含 ma-check DOM 标识（write_dynamic_chart_html 输出）")
-        self.assertIn("is-selected", html, "应包含 is-selected DOM 标识（write_dynamic_chart_html 输出）")
-
-        # 至少 7 个 data-ma-day
-        count_data_ma = html.count("data-ma-day=")
-        self.assertGreaterEqual(count_data_ma, 7, f"预期至少 7 个 data-ma-day 项（write_dynamic_chart_html），实际: {count_data_ma}")
+        # 基本元素存在性契约（当前实现将 MA 控件移出动态 chart 文档，验证图表区域与提示文案）
+        self.assertIn("支持缩放、悬浮提示和图片导出", html, "应包含提示文本（write_dynamic_chart_html 输出）")
+        self.assertIn("<div class='chart-card'", html, "应包含 chart-card 容器（write_dynamic_chart_html 输出）")
+        self.assertIn("echarts.init", html, "应包含 echarts 初始化脚本（write_dynamic_chart_html 输出）")
 
         # 顺序/分段断言
         hint_text = "支持缩放、悬浮提示和图片导出"
         idx_hint = html.find(hint_text)
-        idx_controls = html.find("ma-controls-row")
+        idx_chart = html.find("<div class='chart-card'")
         self.assertNotEqual(idx_hint, -1, "提示文本应存在于 HTML 中（write_dynamic_chart_html 输出）")
-        self.assertNotEqual(idx_controls, -1, "ma-controls-row 应存在于 HTML 中（write_dynamic_chart_html 输出）")
-        self.assertLess(idx_hint, idx_controls, "提示文案应在 MA 操作区之前（write_dynamic_chart_html 输出）")
-        between = html[idx_hint:idx_controls]
-        self.assertIn("</div>", between, "提示与 MA 操作区之间应有闭合的 </div>（write_dynamic_chart_html 输出）")
+        self.assertNotEqual(idx_chart, -1, "图表区域应存在于 HTML 中（write_dynamic_chart_html 输出）")
+        self.assertLess(idx_hint, idx_chart, "提示文案应在图表区域之前（write_dynamic_chart_html 输出）")
+        between = html[idx_hint:idx_chart]
+        self.assertIn("</div>", between, "提示与图表之间应有闭合的 </div>（write_dynamic_chart_html 输出）")
 
     def test_open_dynamic_kline_shows_message_when_browser_open_returns_false(self):
         messages: list[str] = []
