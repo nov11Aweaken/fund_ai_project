@@ -30,6 +30,46 @@ def _extract_label_block(html: str, day: int) -> str | None:
 
 
 class PageRedesignHelperTests(unittest.TestCase):
+    def _extract_label_block(self, html: str, day: int) -> str:
+        """提取包含指定 data-ma-day 的唯一 label 块。"""
+        label_pattern = re.compile(r"<label\b[^>]*>[\s\S]*?</label>", re.I)
+        candidates = label_pattern.findall(html)
+        results = [
+            block for block in candidates
+            if re.search(rf"<input\b[^>]*\bdata-ma-day\s*=\s*['\"]{day}['\"]", block)
+        ]
+        if not results:
+            raise AssertionError(f"label block containing input[data-ma-day='{day}'] not found")
+        if len(results) != 1:
+            raise AssertionError(f"expected exactly one label block for data-ma-day='{day}', found {len(results)}")
+        return results[0]
+
+    def _assert_dynamic_kline_ma_layout_contract(self, html: str, chart_data: dict):
+        days = [5, 10, 20, 30, 60, 120, 250]
+        default_days = chart_data.get("default_ma_days", [5, 10, 20, 250])
+
+        self.assertIn("ma-controls-row", html)
+        for day in days:
+            self.assertRegex(html, re.compile(rf"data-ma-day\s*=\s*['\"]{day}['\"]"))
+
+        body_m = re.search(r"<body[^>]*>([\s\S]*?)</body>", html, re.I)
+        self.assertIsNotNone(body_m)
+        body = body_m.group(1)
+        title = chart_data.get("title", "")
+        self.assertRegex(body, re.compile(re.escape(title) + r".+?</[^>]+>.+?ma-controls-row", re.S))
+
+        for day in days:
+            block = self._extract_label_block(html, day)
+            if day in default_days:
+                self.assertRegex(block, r"\bchecked\b", f"day {day} must include checked")
+                self.assertRegex(block, r"\bis-selected\b", f"day {day} must include is-selected")
+                self.assertRegex(block, r"\bma-check\b", f"day {day} must include ma-check")
+            else:
+                self.assertFalse(
+                    re.search(r"\bchecked\b", block) or re.search(r"\bis-selected\b", block) or re.search(r"\bma-check\b", block),
+                    f"day {day} should NOT be selected",
+                )
+
     def test_ensure_dynamic_chart_asset_copies_bundled_asset_to_output_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
@@ -63,22 +103,62 @@ class PageRedesignHelperTests(unittest.TestCase):
                     main._ensure_dynamic_chart_asset(output_dir)
 
     def test_build_dynamic_chart_document_uses_local_echarts_script_and_full_height_layout(self):
-        html = main.build_dynamic_chart_document(
-            title="测试基金 (110022) 净值走势",
-            option_json='{"series": [], "xAxis": []}',
-            script_src="echarts.min.js",
-        )
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
 
         self.assertIn('<script src="echarts.min.js"></script>', html)
         self.assertIn("height:100vh", html)
         self.assertIn("echarts.init", html)
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]5['\"]"))
+        self.assertIn("MA250", html)
+        self.assertIn("const chartData =", html)
+        self.assertIn("function buildOption(selectedDays)", html)
+        self.assertIn("function mergeCurrentZoom(option)", html)
+        self.assertIn("chart.getOption()", html)
         self.assertNotIn("assets.pyecharts.org", html)
-        # Ensure MA chips and sync logic are present in the generated document
-        self.assertIn('ma-chip', html)
-        self.assertIn('ma-check', html)
-        self.assertIn("addEventListener('change'", html)
+        self.assertIn("function syncMaChipState", html)
+        self.assertIn("syncMaChipStates();", html)
+        self.assertRegex(html, r"classList\.(?:add|remove)\(")
+        self.assertRegex(html, r"\.ma-check\b")
+        self.assertIn("chart.setOption(defaultOption);syncMaChipStates();maInputs.forEach(", html)
+        self.assertNotIn("addEventListener('change', renderChart)", html)
+        self.assertIn("addEventListener('change',", html)
 
-    def test_write_dynamic_chart_html_writes_html_that_uses_local_echarts_script(self):
+        m = re.search(r"addEventListener\(\s*['\"]change['\"]\s*,\s*\(?\w*\)?\s*=>\s*\{([\s\S]*?)\}\s*\)", html)
+        self.assertIsNotNone(m, "change event listener callback not found")
+        body = m.group(1)
+        sync_idx = body.find("syncMaChipState(")
+        render_idx = body.find("renderChart(")
+        self.assertTrue(sync_idx != -1 and render_idx != -1 and sync_idx < render_idx)
+
+    def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
+
+    def test_write_dynamic_chart_html_outputs_ma_controls_row_and_defaults(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             charts_dir = base_dir / "charts"
@@ -91,86 +171,124 @@ class PageRedesignHelperTests(unittest.TestCase):
             with (
                 mock.patch.object(main, "_log_dir", return_value=base_dir),
                 mock.patch.object(main, "_app_dir", return_value=base_dir),
-                mock.patch.object(
-                    main,
-                    "build_dynamic_chart_options",
-                    return_value={
-                        "title": "测试基金 (110022) 净值走势",
-                        "option_json": '{"series": [], "xAxis": []}',
-                    },
-                ),
-            ):
-                html_path = main.write_dynamic_chart_html(
-                    {"code": "110022", "label": "测试基金 (110022)", "type": "fund"}
-                )
-                html = html_path.read_text(encoding="utf-8")
-
-        self.assertIn('<script src="echarts.min.js"></script>', html)
-        self.assertNotIn("assets.pyecharts.org", html)
-
-    def test_dynamic_kline_ma_layout_contract_get_chart_html(self):
-        """验证 get_chart_html()/build_dynamic_chart_document 对 MA 布局的契约（静态字符串检查）
-
-        保留以下契约点：ma-controls-row, 7 个 data-ma-day, is-selected, ma-check。
-        同时以更稳健的方式替换脆弱的旧断言：确认提示文本在标题行中，且在标题行和 ma-controls-row 之间有一个闭合的 div，表明 ma 控件在下一行。
-        """
-        html = main.get_chart_html("110022", "测试基金")
-
-        # 基本元素存在性契约（当前实现将 MA 控件移出动态 chart 文档，验证图表区域与提示文案）
-        self.assertIn("支持缩放、悬浮提示和图片导出", html, "应包含提示文本")
-        self.assertIn("<div class='chart-card'", html, "应包含 chart-card 容器")
-        self.assertIn("echarts.init", html, "应包含 echarts 初始化脚本")
-
-        # 确认提示文本出现在标题/工具栏中，并且在标题与图表之间存在闭合 div
-        hint_text = "支持缩放、悬浮提示和图片导出"
-        idx_hint = html.find(hint_text)
-        idx_chart = html.find("<div class='chart-card'")
-        self.assertNotEqual(idx_hint, -1, "提示文本应存在于 HTML 中")
-        self.assertNotEqual(idx_chart, -1, "图表区域应存在于 HTML 中")
-        self.assertLess(idx_hint, idx_chart, "提示文案应在图表区域之前（标题行靠前）")
-        between = html[idx_hint:idx_chart]
-        self.assertIn("</div>", between, "提示与图表之间应有闭合的 </div>，表明标题行已结束")
-
-    def test_dynamic_kline_ma_layout_contract_write_dynamic_chart_html(self):
-        """与 get_chart_html() 相同的断言，但通过 write_dynamic_chart_html 输出文件验证契约一致性"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base_dir = Path(tmpdir)
-            charts_dir = base_dir / "charts"
-            charts_dir.mkdir(parents=True, exist_ok=True)
-            assets_dir = base_dir / "assets"
-            assets_dir.mkdir(parents=True, exist_ok=True)
-            bundled_asset = assets_dir / "echarts.min.js"
-            bundled_asset.write_text("// echarts runtime", encoding="utf-8")
-
-            with (
-                mock.patch.object(main, "_log_dir", return_value=base_dir),
-                mock.patch.object(main, "_app_dir", return_value=base_dir),
-                mock.patch.object(
-                    main,
-                    "build_dynamic_chart_options",
-                    return_value={
-                        "title": "测试基金 (110022) 净值走势",
-                        "option_json": '{"series": [], "xAxis": []}',
-                    },
-                ),
+                mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data),
             ):
                 html_path = main.write_dynamic_chart_html({"code": "110022", "label": "测试基金 (110022)", "type": "fund"})
                 html = html_path.read_text(encoding="utf-8")
 
-        # 基本元素存在性契约（当前实现将 MA 控件移出动态 chart 文档，验证图表区域与提示文案）
-        self.assertIn("支持缩放、悬浮提示和图片导出", html, "应包含提示文本（write_dynamic_chart_html 输出）")
-        self.assertIn("<div class='chart-card'", html, "应包含 chart-card 容器（write_dynamic_chart_html 输出）")
-        self.assertIn("echarts.init", html, "应包含 echarts 初始化脚本（write_dynamic_chart_html 输出）")
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
 
-        # 顺序/分段断言
-        hint_text = "支持缩放、悬浮提示和图片导出"
-        idx_hint = html.find(hint_text)
-        idx_chart = html.find("<div class='chart-card'")
-        self.assertNotEqual(idx_hint, -1, "提示文本应存在于 HTML 中（write_dynamic_chart_html 输出）")
-        self.assertNotEqual(idx_chart, -1, "图表区域应存在于 HTML 中（write_dynamic_chart_html 输出）")
-        self.assertLess(idx_hint, idx_chart, "提示文案应在图表区域之前（write_dynamic_chart_html 输出）")
-        between = html[idx_hint:idx_chart]
-        self.assertIn("</div>", between, "提示与图表之间应有闭合的 </div>（write_dynamic_chart_html 输出）")
+    def test_get_chart_html_outputs_new_layout_contract(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+
+        with mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data) as mock_build:
+            html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
+
+        mock_build.assert_called_once_with("110022", "测试基金")
+        self._assert_dynamic_kline_ma_layout_contract(html, chart_data)
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+
+    def test_build_dynamic_chart_series_keeps_nav_when_no_ma_selected(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {"5": [None, None], "10": [None, None]},
+            "ma_candidates": [5, 10],
+            "default_ma_days": [5],
+        }
+
+        series = main.build_dynamic_chart_series(chart_data, [])
+
+        self.assertEqual([item["name"] for item in series], ["单位净值"])
+        self.assertEqual(series[0]["data"], [1.0, 1.1])
+
+    def test_build_dynamic_chart_option_uses_selected_ma_series(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02", "2023-01-03"],
+            "nav_values": [1.0, 1.1, 1.2],
+            "ma_series": {"5": [None, None, None], "10": [None, None, None], "20": [None, None, None]},
+            "ma_candidates": [5, 10, 20],
+            "default_ma_days": [5, 10],
+        }
+
+        option = main.build_dynamic_chart_option(chart_data, [10, 5])
+
+        self.assertEqual(option["legend"]["data"], ["单位净值", "MA10", "MA5"])
+        self.assertEqual([item["name"] for item in option["series"]], ["单位净值", "MA10", "MA5"])
+        self.assertEqual(option["xAxis"]["data"], chart_data["dates"])
+        self.assertNotIn("title", option)
+
+    def test_build_dynamic_chart_option_disables_legend_toggle(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {"5": [None, None]},
+            "ma_candidates": [5],
+            "default_ma_days": [5],
+        }
+
+        option = main.build_dynamic_chart_option(chart_data, [5])
+
+        self.assertFalse(option["legend"]["selectedMode"])
+
+    def test_write_dynamic_chart_html_writes_html_that_uses_local_echarts_script(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            charts_dir = base_dir / "charts"
+            charts_dir.mkdir(parents=True, exist_ok=True)
+            assets_dir = base_dir / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            bundled_asset = assets_dir / "echarts.min.js"
+            bundled_asset.write_text("// echarts runtime", encoding="utf-8")
+
+            with (
+                mock.patch.object(main, "_log_dir", return_value=base_dir),
+                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data),
+            ):
+                html_path = main.write_dynamic_chart_html({"code": "110022", "label": "测试基金 (110022)", "type": "fund"})
+                html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn('<script src="echarts.min.js"></script>', html)
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]5['\"]"))
+        self.assertIn("const defaultOption =", html)
+        self.assertNotIn("assets.pyecharts.org", html)
+
+    def test_get_chart_html_uses_structured_dynamic_chart_contract(self):
+        chart_data = {
+            "title": "测试基金 (110022) 净值走势",
+            "dates": ["2023-01-01", "2023-01-02"],
+            "nav_values": [1.0, 1.1],
+            "ma_series": {str(k): [None, None] for k in [5, 10, 20, 30, 60, 120, 250]},
+            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+            "default_ma_days": [5, 10, 20, 250],
+        }
+
+        with mock.patch.object(main, "build_dynamic_chart_data", return_value=chart_data) as mock_build:
+            html = main.get_chart_html("110022", "测试基金", "echarts.min.js")
+
+        mock_build.assert_called_once_with("110022", "测试基金")
+        self.assertRegex(html, re.compile(r"data-ma-day\s*=\s*['\"]250['\"]"))
+        self.assertIn("const chartData =", html)
+        self.assertIn('<script src="echarts.min.js"></script>', html)
 
     def test_open_dynamic_kline_shows_message_when_browser_open_returns_false(self):
         messages: list[str] = []
@@ -314,22 +432,21 @@ class PageRedesignHelperTests(unittest.TestCase):
 
 
     def test_build_dynamic_chart_data_nan_keys_and_none_and_json_roundtrip(self):
-        dates = pd.date_range("2020-01-01", periods=6, freq='D')
+        dates = pd.date_range("2020-01-01", periods=6, freq="D")
         values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         df = pd.DataFrame({"净值日期": dates, "单位净值": values})
         with mock.patch.object(main, "fetch_fund_history_data", return_value=df):
-            data = main.build_dynamic_chart_data("110022", "测试基金")
+            data = main.build_dynamic_chart_data("110022", "测试基金 (110022)")
 
         self.assertIn("ma_series", data)
         ms = data["ma_series"]
-        # keys are strings for stable JSON
         self.assertTrue(all(isinstance(k, str) for k in ms.keys()))
         self.assertIn("5", ms)
-        # early rolling windows should produce missing values which must be None (not NaN)
+        self.assertEqual(data["ma_candidates"], [5, 10, 20, 30, 60, 120, 250])
+        self.assertEqual(data["default_ma_days"], [5, 10, 20, 250])
+        self.assertEqual(data["title"], "测试基金 (110022) 净值走势")
         self.assertIsNone(ms["5"][0])
-        # nav values should be plain Python floats
         self.assertTrue(all(isinstance(v, float) for v in data["nav_values"]))
-        # JSON round-trip preserves keys and nulls
         s = json.dumps(ms)
         loaded = json.loads(s)
         self.assertEqual(set(loaded.keys()), set(ms.keys()))
@@ -342,20 +459,22 @@ class PageRedesignHelperTests(unittest.TestCase):
                 main.build_dynamic_chart_data("110022", "测试基金")
 
     def test_build_dynamic_chart_document_escapes_script_variants(self):
-        """回归测试：确保嵌入到 inline <script> 的 JSON 中无法形成结束标签，无论大小写。"""
-        mixed = '</ScRiPt><script>alert(1)</script>'
-        lower = '</script><script>alert(2)</script>'
-        # Build option_json containing the mixed-case payload inside a string value
-        option_json = json.dumps({"series": [], "xAxis": [], "title": mixed})
-        html = main.build_dynamic_chart_document(title="safe", option_json=option_json, script_src="echarts.min.js")
-
-        # 原始恶意 payload 不应直接出现在生成的 HTML 中
-        self.assertNotIn(mixed, html)
-        self.assertNotIn(lower, html)
-        # 不应出现任意大小写组合的 </script>
-        self.assertIsNone(re.search(r'</script>', html, re.I))
-        # 确认 JSON 中的 '<' 被转义为 unicode 转义序列，防止标签形成
-        self.assertIn('\\u003c', html)
+        for payload in [
+            "x</script><script>alert(1)</script>",
+            "x</ScRiPt><script>alert(1)</script>",
+        ]:
+            chart_data = {
+                "title": payload,
+                "dates": ["2023-01-01"],
+                "nav_values": [1.0],
+                "ma_series": {str(k): [None] for k in [5, 10, 20, 30, 60, 120, 250]},
+                "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+                "default_ma_days": [5, 10, 20, 250],
+            }
+            html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
+            self.assertNotIn(payload, html)
+            self.assertIn("\\u003c", html)
+            self.assertEqual(html.count("</script>"), 2)
 
 
 if __name__ == "__main__":
