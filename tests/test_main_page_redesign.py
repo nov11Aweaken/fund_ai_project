@@ -154,20 +154,22 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertTrue(sync_idx != -1 and render_idx != -1 and sync_idx < render_idx, "change listener should call syncMaChipState before renderChart")
 
     def test_build_dynamic_chart_document_escapes_closing_script(self):
-        # Ensure malicious titles containing </script> do not break the inline script
-        chart_data = {
-            "title": "x</script><script>alert(1)</script>",
-            "dates": ["2023-01-01"],
-            "nav_values": [1.0],
-            "ma_series": {str(k): [None] for k in [5, 10, 20, 30, 60, 120, 250]},
-            "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
-            "default_ma_days": [5, 10, 20, 250],
-        }
-        html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
-        # raw payload should not appear unescaped
-        self.assertNotIn("</script><script>alert(1)</script>", html)
-        # Expect only the external script close and the inline script close
-        self.assertEqual(html.count("</script>"), 2)
+        for payload in [
+            "x</script><script>alert(1)</script>",
+            "x</ScRiPt><script>alert(1)</script>",
+        ]:
+            chart_data = {
+                "title": payload,
+                "dates": ["2023-01-01"],
+                "nav_values": [1.0],
+                "ma_series": {str(k): [None] for k in [5, 10, 20, 30, 60, 120, 250]},
+                "ma_candidates": [5, 10, 20, 30, 60, 120, 250],
+                "default_ma_days": [5, 10, 20, 250],
+            }
+            html = main.build_dynamic_chart_document(chart_data=chart_data, script_src="echarts.min.js")
+            self.assertNotIn(payload, html)
+            self.assertIn("\\u003c", html)
+            self.assertEqual(html.count("</script>"), 2)
 
     def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
         """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
