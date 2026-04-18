@@ -135,6 +135,13 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("function mergeCurrentZoom(option)", html)
         self.assertIn("chart.getOption()", html)
         self.assertNotIn("assets.pyecharts.org", html)
+        # static JS assertions: ensure MA chip sync helper and DOM ops are present
+        self.assertIn("function syncMaChipState", html)
+        self.assertRegex(html, r"classList\.(?:add|remove)\(")
+        self.assertRegex(html, r"\.ma-check\b")
+        # event listener should no longer be the old simple form that only referenced renderChart
+        self.assertNotIn("addEventListener('change', renderChart)", html)
+        self.assertIn("addEventListener('change',", html)
 
     def test_build_dynamic_chart_document_outputs_ma_controls_row_and_candidates(self):
         """验证 build_dynamic_chart_document 输出新的 MA 控件行和候选项，以及默认选中标识。
