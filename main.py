@@ -930,15 +930,17 @@ class FletApp:
         self.txt_price = ft.Text("--", size=44, weight=ft.FontWeight.BOLD, color=VALUE_TEXT, font_family=FONT_MONO)
         self.txt_change = ft.Text("", size=18, weight=ft.FontWeight.W_600, color=SUBTEXT, font_family=FONT_MONO)
 
-        self.btn_detail_holding_action = ft.IconButton(
-            ft.Icons.ADD_CARD,
+        holding_action_config = self._detail_holding_action_config(default_target["code"])
+        self.btn_detail_holding_action = ft.Button(
+            holding_action_config["label"],
+            icon=holding_action_config["icon"],
             on_click=self.open_current_target_holding_dialog,
             icon_color=ACCENT,
-            tooltip="录入持仓",
+            tooltip=holding_action_config["tooltip"],
             style=ft.ButtonStyle(
                 padding=ft.Padding(10, 10, 10, 10),
                 shape=ft.RoundedRectangleBorder(radius=12),
-                bgcolor={ft.ControlState.DEFAULT: "#102196F3"},
+                bgcolor={ft.ControlState.DEFAULT: holding_action_config["bgcolor"]},
                 overlay_color={ft.ControlState.HOVERED: "#162196F3"},
             ),
         )
@@ -2467,6 +2469,7 @@ class FletApp:
             holding.get("units") is not None or holding.get("cost_amount") is not None
         )
         return {
+            "label": "编辑持仓" if has_holding else "录入持仓",
             "icon": ft.Icons.EDIT_NOTE if has_holding else ft.Icons.ADD_CARD,
             "tooltip": "编辑持仓" if has_holding else "录入持仓",
             "bgcolor": "#102196F3" if has_holding else "#0F2196F3",
@@ -2477,7 +2480,9 @@ class FletApp:
         if button is None:
             return
         config = self._detail_holding_action_config(self.current_target_data().get("code"))
+        button.content = config["label"]
         button.icon = config["icon"]
+        button.icon_color = ACCENT
         button.tooltip = config["tooltip"]
         button.style = ft.ButtonStyle(
             padding=ft.Padding(10, 10, 10, 10),

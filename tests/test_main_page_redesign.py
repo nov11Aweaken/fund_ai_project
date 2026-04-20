@@ -408,8 +408,10 @@ class PageRedesignHelperTests(unittest.TestCase):
 
         config = FletApp._detail_holding_action_config(dummy_app, "110022")
 
+        self.assertEqual(config["label"], "录入持仓")
         self.assertEqual(config["icon"], ft.Icons.ADD_CARD)
         self.assertEqual(config["tooltip"], "录入持仓")
+        self.assertEqual(config["bgcolor"], "#0F2196F3")
 
     def test_detail_holding_action_config_uses_edit_icon_with_holding(self):
         dummy_app = types.SimpleNamespace(
@@ -418,8 +420,38 @@ class PageRedesignHelperTests(unittest.TestCase):
 
         config = FletApp._detail_holding_action_config(dummy_app, "110022")
 
+        self.assertEqual(config["label"], "编辑持仓")
         self.assertEqual(config["icon"], ft.Icons.EDIT_NOTE)
         self.assertEqual(config["tooltip"], "编辑持仓")
+        self.assertEqual(config["bgcolor"], "#102196F3")
+
+    def test_refresh_detail_holding_action_updates_text_icon_tooltip_and_style(self):
+        dummy_app = types.SimpleNamespace(
+            current_target_data=lambda: {"code": "110022"},
+            _detail_holding_action_config=lambda code: {
+                "label": "编辑持仓",
+                "icon": ft.Icons.EDIT_NOTE,
+                "tooltip": "编辑持仓",
+                "bgcolor": "#102196F3",
+            },
+            btn_detail_holding_action=ft.Button(
+                "录入持仓",
+                icon=ft.Icons.ADD_CARD,
+                tooltip="录入持仓",
+                style=ft.ButtonStyle(
+                    bgcolor={ft.ControlState.DEFAULT: "#0F2196F3"},
+                    overlay_color={ft.ControlState.HOVERED: "#162196F3"},
+                ),
+            ),
+        )
+
+        FletApp._refresh_detail_holding_action(dummy_app)
+
+        button = dummy_app.btn_detail_holding_action
+        self.assertEqual(button.content, "编辑持仓")
+        self.assertEqual(button.icon, ft.Icons.EDIT_NOTE)
+        self.assertEqual(button.tooltip, "编辑持仓")
+        self.assertEqual(button.style.bgcolor[ft.ControlState.DEFAULT], "#102196F3")
 
     def test_build_fund_detail_panel_enables_vertical_scroll(self):
         dummy_app = types.SimpleNamespace()
