@@ -2375,7 +2375,9 @@ class FletApp:
             market_metric = metrics[0] if metrics else {"primary": "--", "secondary": "--", "color": SUBTEXT}
             est_val = market_metric["primary"]
             est_color = market_metric["color"]
-            prev_nav_text = market_metric["secondary"]
+            prev_nav_label_text = market_metric.get("secondary_label") or prev_nav_label
+            prev_nav_value_text = market_metric.get("secondary_value") or "--"
+            prev_nav_value_color = market_metric.get("secondary_color", SUBTEXT)
 
             # Left Column: Name + Code
             left_col = ft.Column(
@@ -2403,7 +2405,14 @@ class FletApp:
             data_col = ft.Column(
                 [
                     ft.Text(est_val, color=est_color, size=15, weight=ft.FontWeight.W_700, font_family=FONT_MONO, text_align=ft.TextAlign.RIGHT),
-                    ft.Text(prev_nav_text, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
+                    ft.Row(
+                        [
+                            ft.Text(prev_nav_label_text, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
+                            ft.Text(prev_nav_value_text, color=prev_nav_value_color, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
+                        ],
+                        spacing=4,
+                        alignment=ft.MainAxisAlignment.END,
+                    ),
                 ],
                 spacing=2,
                 horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -2690,11 +2699,15 @@ class FletApp:
             {
                 "label": "行情",
                 "primary": pct_text(item.get("est_pct")),
-                "secondary": f"{prev_nav_label} {pct_text(item.get('prev_day_pct'))}",
+                "secondary": f"昨净 {pct_text(item.get('prev_day_pct'))}",
+                "secondary_label": "昨净",
+                "secondary_value": pct_text(item.get("prev_day_pct")),
+                "secondary_color": FletApp._metric_color(self, item.get("prev_day_pct")),
                 "color": (UP if (item.get("est_pct") or 0) > 0 else DOWN if (item.get("est_pct") or 0) < 0 else VALUE_TEXT)
                 if item.get("est_pct") is not None
                 else SUBTEXT,
             },
+
             {
                 "label": "持仓",
                 "primary": number_text(item.get("holding_units"), "份"),
