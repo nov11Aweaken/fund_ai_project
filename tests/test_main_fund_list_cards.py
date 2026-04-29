@@ -46,12 +46,11 @@ class FundListCardHelperTests(unittest.TestCase):
         self.assertEqual(secondary_value.color, DOWN)
         self.assertNotEqual(primary.weight, secondary_value.weight)
 
-    def test_build_fund_list_market_row_keeps_three_controls_for_missing_secondary_value(self):
+    def test_build_fund_list_market_row_keeps_three_controls_for_missing_secondary_value_key(self):
         row = FletApp._build_fund_list_market_row(
             types.SimpleNamespace(),
             {
                 "secondary_label": "昨净",
-                "secondary_value": "--",
                 "secondary_color": SUBTEXT,
                 "primary": "--",
                 "color": SUBTEXT,
