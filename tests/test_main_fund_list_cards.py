@@ -1,10 +1,72 @@
 import types
 import unittest
 
-from main import FletApp, DOWN, UP, VALUE_TEXT
+import flet as ft
+
+from main import FletApp, DOWN, SUBTEXT, UP, VALUE_TEXT
 
 
 class FundListCardHelperTests(unittest.TestCase):
+    def test_build_fund_list_market_row_places_secondary_metric_before_primary(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_value": "+0.63%",
+                "secondary_color": UP,
+                "primary": "+1.28%",
+                "color": UP,
+            },
+        )
+
+        self.assertIsInstance(row, ft.Row)
+        self.assertEqual(row.controls[0].value, "昨净")
+        self.assertEqual(row.controls[1].value, "+0.63%")
+        self.assertEqual(row.controls[2].value, "+1.28%")
+
+    def test_build_fund_list_market_row_uses_weaker_secondary_metric_styling(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_value": "-0.63%",
+                "secondary_color": DOWN,
+                "primary": "+1.28%",
+                "color": UP,
+            },
+        )
+
+        secondary_label = row.controls[0]
+        secondary_value = row.controls[1]
+        primary = row.controls[2]
+
+        self.assertLess(secondary_label.size, primary.size)
+        self.assertLess(secondary_value.size, primary.size)
+        self.assertEqual(secondary_label.color, SUBTEXT)
+        self.assertEqual(secondary_value.color, DOWN)
+        self.assertNotEqual(primary.weight, secondary_value.weight)
+
+    def test_build_fund_list_market_row_keeps_three_controls_for_missing_secondary_value(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_value": "--",
+                "secondary_color": SUBTEXT,
+                "primary": "--",
+                "color": SUBTEXT,
+            },
+        )
+
+        self.assertIsInstance(row, ft.Row)
+        self.assertEqual(len(row.controls), 3)
+        self.assertEqual(row.controls[0].value, "昨净")
+        self.assertEqual(row.controls[1].value, "--")
+        self.assertEqual(row.controls[2].value, "--")
+        self.assertEqual(row.spacing, 8)
+        self.assertEqual(row.alignment, ft.MainAxisAlignment.END)
+        self.assertEqual(row.vertical_alignment, ft.CrossAxisAlignment.CENTER)
+
     def test_build_fund_overview_metrics_returns_four_modern_metric_blocks(self):
         dummy_app = types.SimpleNamespace()
 
