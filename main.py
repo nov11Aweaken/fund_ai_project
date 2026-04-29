@@ -2375,7 +2375,9 @@ class FletApp:
             market_metric = metrics[0] if metrics else {"primary": "--", "secondary": "--", "color": SUBTEXT}
             est_val = market_metric["primary"]
             est_color = market_metric["color"]
-            prev_nav_text = market_metric["secondary"]
+            prev_nav_label_text = market_metric.get("secondary_label") or prev_nav_label
+            prev_nav_value_text = market_metric.get("secondary_value") or "--"
+            prev_nav_value_color = market_metric.get("secondary_color", SUBTEXT)
 
             # Left Column: Name + Code
             left_col = ft.Column(
@@ -2402,8 +2404,7 @@ class FletApp:
             # Center/Right Column: Valuation + Prev Nav (Right aligned)
             data_col = ft.Column(
                 [
-                    ft.Text(est_val, color=est_color, size=15, weight=ft.FontWeight.W_700, font_family=FONT_MONO, text_align=ft.TextAlign.RIGHT),
-                    ft.Text(prev_nav_text, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
+                    self._build_fund_list_market_row(market_metric),
                 ],
                 spacing=2,
                 horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -2691,6 +2692,9 @@ class FletApp:
                 "label": "行情",
                 "primary": pct_text(item.get("est_pct")),
                 "secondary": f"{prev_nav_label} {pct_text(item.get('prev_day_pct'))}",
+                "secondary_label": prev_nav_label,
+                "secondary_value": pct_text(item.get("prev_day_pct")),
+                "secondary_color": FletApp._metric_color(self, item.get("prev_day_pct")),
                 "color": (UP if (item.get("est_pct") or 0) > 0 else DOWN if (item.get("est_pct") or 0) < 0 else VALUE_TEXT)
                 if item.get("est_pct") is not None
                 else SUBTEXT,
@@ -2718,6 +2722,18 @@ class FletApp:
                 else SUBTEXT,
             },
         ]
+
+    def _build_fund_list_market_row(self, metric: dict) -> ft.Row:
+        return ft.Row(
+            [
+                ft.Text(metric.get("secondary_label") or "", color=SUBTEXT, size=10, no_wrap=True),
+                ft.Text(metric.get("secondary_value") or "--", color=metric.get("secondary_color", SUBTEXT), size=11, no_wrap=True),
+                ft.Text(metric.get("primary") or "--", color=metric.get("color", VALUE_TEXT), size=15, weight=ft.FontWeight.W_700, font_family=FONT_MONO),
+            ],
+            spacing=8,
+            alignment=ft.MainAxisAlignment.END,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
     def _module_card(self, content: ft.Control, *, padding: int = 14, expand: bool | int | None = None) -> ft.Container:
         return ft.Container(
