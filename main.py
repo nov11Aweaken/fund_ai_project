@@ -2401,18 +2401,11 @@ class FletApp:
                 expand=True,
             )
 
-            # Center/Right Column: Valuation + Prev Nav (Right aligned)
+            # Center/Right Column: Valuation + Prev Nav (compact single-line secondary)
             data_col = ft.Column(
                 [
                     ft.Text(est_val, color=est_color, size=15, weight=ft.FontWeight.W_700, font_family=FONT_MONO, text_align=ft.TextAlign.RIGHT),
-                    ft.Row(
-                        [
-                            ft.Text(prev_nav_label_text, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
-                            ft.Text(prev_nav_value_text, color=prev_nav_value_color, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
-                        ],
-                        spacing=4,
-                        alignment=ft.MainAxisAlignment.END,
-                    ),
+                    ft.Text(market_metric.get("secondary") or prev_nav_label, color=SUBTEXT, size=10, no_wrap=True, text_align=ft.TextAlign.RIGHT),
                 ],
                 spacing=2,
                 horizontal_alignment=ft.CrossAxisAlignment.END,
