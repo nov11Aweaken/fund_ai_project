@@ -20,9 +20,13 @@ class FundListCardHelperTests(unittest.TestCase):
         )
 
         self.assertIsInstance(row, ft.Row)
-        self.assertEqual(row.controls[0].value, "昨净")
-        self.assertEqual(row.controls[1].value, "+0.63%")
-        self.assertEqual(row.controls[2].value, "+1.28%")
+        self.assertEqual(len(row.controls), 2)
+        secondary_group = row.controls[0]
+        primary = row.controls[1]
+        self.assertIsInstance(secondary_group, ft.Row)
+        self.assertEqual(secondary_group.controls[0].value, "昨净")
+        self.assertEqual(secondary_group.controls[1].value, "+0.63%")
+        self.assertEqual(primary.value, "+1.28%")
 
     def test_build_fund_list_market_row_uses_weaker_secondary_metric_styling(self):
         row = FletApp._build_fund_list_market_row(
@@ -36,9 +40,10 @@ class FundListCardHelperTests(unittest.TestCase):
             },
         )
 
-        secondary_label = row.controls[0]
-        secondary_value = row.controls[1]
-        primary = row.controls[2]
+        secondary_group = row.controls[0]
+        secondary_label = secondary_group.controls[0]
+        secondary_value = secondary_group.controls[1]
+        primary = row.controls[1]
 
         self.assertLess(secondary_label.size, primary.size)
         self.assertLess(secondary_value.size, primary.size)
@@ -46,7 +51,7 @@ class FundListCardHelperTests(unittest.TestCase):
         self.assertEqual(secondary_value.color, DOWN)
         self.assertNotEqual(primary.weight, secondary_value.weight)
 
-    def test_build_fund_list_market_row_keeps_three_controls_for_missing_secondary_value_key(self):
+    def test_build_fund_list_market_row_keeps_grouped_placeholder_when_secondary_value_key_missing(self):
         row = FletApp._build_fund_list_market_row(
             types.SimpleNamespace(),
             {
@@ -58,11 +63,17 @@ class FundListCardHelperTests(unittest.TestCase):
         )
 
         self.assertIsInstance(row, ft.Row)
-        self.assertEqual(len(row.controls), 3)
-        self.assertEqual(row.controls[0].value, "昨净")
-        self.assertEqual(row.controls[1].value, "--")
-        self.assertEqual(row.controls[2].value, "--")
-        self.assertEqual(row.spacing, 8)
+        self.assertEqual(len(row.controls), 2)
+        secondary_group = row.controls[0]
+        primary = row.controls[1]
+        self.assertIsInstance(secondary_group, ft.Row)
+        self.assertEqual(secondary_group.controls[0].value, "昨净")
+        self.assertEqual(secondary_group.controls[1].value, "--")
+        self.assertEqual(secondary_group.controls[1].color, SUBTEXT)
+        self.assertEqual(primary.value, "--")
+        self.assertEqual(primary.color, SUBTEXT)
+        self.assertEqual(secondary_group.spacing, 4)
+        self.assertEqual(row.spacing, 14)
         self.assertEqual(row.alignment, ft.MainAxisAlignment.END)
         self.assertEqual(row.vertical_alignment, ft.CrossAxisAlignment.CENTER)
 
@@ -174,9 +185,11 @@ class FundListCardHelperTests(unittest.TestCase):
                 "secondary_color": DOWN,
             },
         )
-        self.assertEqual(row.controls[0].value, "昨净")
-        self.assertEqual(row.controls[1].value, "-0.63%")
-        self.assertEqual(row.controls[2].value, "+1.28%")
+        secondary_group = row.controls[0]
+        self.assertIsInstance(secondary_group, ft.Row)
+        self.assertEqual(secondary_group.controls[0].value, "昨净")
+        self.assertEqual(secondary_group.controls[1].value, "-0.63%")
+        self.assertEqual(row.controls[1].value, "+1.28%")
 
     def test_build_fund_list_market_row_uses_weaker_style_for_secondary_metric(self):
         dummy_app = types.SimpleNamespace()
@@ -190,12 +203,17 @@ class FundListCardHelperTests(unittest.TestCase):
                 "secondary_color": DOWN,
             },
         )
-        self.assertLess(row.controls[0].size, row.controls[2].size)
-        self.assertLess(row.controls[1].size, row.controls[2].size)
-        self.assertEqual(row.controls[1].color, DOWN)
-        self.assertNotEqual(row.controls[2].weight, row.controls[1].weight)
+        secondary_group = row.controls[0]
+        secondary_label = secondary_group.controls[0]
+        secondary_value = secondary_group.controls[1]
+        primary = row.controls[1]
+        self.assertLess(secondary_label.size, primary.size)
+        self.assertLess(secondary_value.size, primary.size)
+        self.assertEqual(secondary_label.color, SUBTEXT)
+        self.assertEqual(secondary_value.color, DOWN)
+        self.assertNotEqual(primary.weight, secondary_value.weight)
 
-    def test_build_fund_list_market_row_keeps_single_line_with_missing_secondary_value(self):
+    def test_build_fund_list_market_row_keeps_grouped_placeholder_colors_with_missing_secondary_value(self):
         dummy_app = types.SimpleNamespace()
         row = FletApp._build_fund_list_market_row(
             dummy_app,
@@ -207,10 +225,61 @@ class FundListCardHelperTests(unittest.TestCase):
                 "secondary_color": VALUE_TEXT,
             },
         )
-        self.assertEqual(len(row.controls), 3)
+        self.assertEqual(len(row.controls), 2)
+        secondary_group = row.controls[0]
+        self.assertEqual(secondary_group.controls[0].value, "昨净")
+        self.assertEqual(secondary_group.controls[1].value, "--")
+        self.assertEqual(secondary_group.controls[1].color, VALUE_TEXT)
         self.assertEqual(row.controls[1].value, "--")
-        self.assertEqual(row.controls[2].value, "--")
+        self.assertEqual(row.controls[1].color, SUBTEXT)
 
+
+    def test_build_fund_list_market_row_groups_secondary_metric_before_primary(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_value": "-0.63%",
+                "secondary_color": DOWN,
+                "primary": "+1.28%",
+                "color": UP,
+            },
+        )
+        secondary_group = row.controls[0]
+        primary = row.controls[1]
+        self.assertIsInstance(secondary_group, ft.Row)
+        self.assertEqual(secondary_group.controls[0].value, "昨净")
+        self.assertEqual(secondary_group.controls[1].value, "-0.63%")
+        self.assertEqual(primary.value, "+1.28%")
+
+    def test_build_fund_list_market_row_uses_exact_group_and_row_spacing(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_value": "-0.63%",
+                "secondary_color": DOWN,
+                "primary": "+1.28%",
+                "color": UP,
+            },
+        )
+        secondary_group = row.controls[0]
+        self.assertEqual(secondary_group.spacing, 4)
+        self.assertEqual(row.spacing, 14)
+
+    def test_build_fund_list_market_row_keeps_secondary_group_when_value_missing(self):
+        row = FletApp._build_fund_list_market_row(
+            types.SimpleNamespace(),
+            {
+                "secondary_label": "昨净",
+                "secondary_color": VALUE_TEXT,
+                "primary": "--",
+                "color": SUBTEXT,
+            },
+        )
+        secondary_group = row.controls[0]
+        self.assertEqual(secondary_group.controls[1].value, "--")
+        self.assertEqual(row.controls[1].value, "--")
 
 if __name__ == "__main__":
     unittest.main()

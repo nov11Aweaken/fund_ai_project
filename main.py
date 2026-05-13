@@ -2722,14 +2722,20 @@ class FletApp:
         ]
 
     def _build_fund_list_market_row(self, metric: dict) -> ft.Row:
-        secondary_value = metric.get("secondary_value") or "--"
-        return ft.Row(
+        secondary_group = ft.Row(
             [
                 ft.Text(metric["secondary_label"], color=SUBTEXT, size=10),
-                ft.Text(secondary_value, color=metric["secondary_color"], size=11),
+                ft.Text(metric.get("secondary_value") or "--", color=metric["secondary_color"], size=11),
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        return ft.Row(
+            [
+                secondary_group,
                 ft.Text(metric["primary"], color=metric["color"], size=15, weight=ft.FontWeight.W_700),
             ],
-            spacing=8,
+            spacing=14,
             alignment=ft.MainAxisAlignment.END,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
