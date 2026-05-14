@@ -238,7 +238,23 @@ def test_build_detail_metric_table_keeps_placeholder_rows_when_values_missing(se
     self.assertEqual(table.controls[0].controls[2].value, "--")
 ```
 
-- [ ] **Step 4: 运行测试，确认先失败**
+- [ ] **Step 4: 写失败测试，锁定详情刷新链路会更新新的表格控件**
+
+```python
+def test_apply_fund_detail_metrics_updates_compact_table_refs(self):
+    dummy_app = types.SimpleNamespace(
+        detail_return_table=ft.Column([]),
+        detail_ma_table=ft.Column([]),
+        _build_fund_detail_return_metrics=lambda payload: [{"label": "近3日", "subtitle": "短线表现", "value": "+1.82%", "color": main.UP}],
+        _build_fund_detail_ma_metrics=lambda payload: [{"label": "估值分位", "subtitle": "近历史区间", "value": "62.40%", "color": main.VALUE_TEXT}],
+        _apply_detail_metric_table=FletApp._apply_detail_metric_table,
+    )
+    FletApp._apply_fund_detail_compact_metrics(dummy_app, {"chg3": 1.82}, {"percentile": 62.4})
+    self.assertEqual(dummy_app.detail_return_table.controls[0].controls[0].value, "近3日")
+    self.assertEqual(dummy_app.detail_ma_table.controls[0].controls[0].value, "估值分位")
+```
+
+- [ ] **Step 5: 运行测试，确认先失败**
 
 Run:
 
@@ -248,7 +264,7 @@ python -m unittest discover -s tests -p "test_main_page_redesign.py" -v
 
 Expected: 因当前详情页仍走 `detail_section_card(... self._build_metric_wrap_row(...))` 路线而失败。
 
-- [ ] **Step 5: 写最小实现**
+- [ ] **Step 6: 写最小实现**
 
 ```python
 returns_section = self._build_detail_compact_section_card(
@@ -273,9 +289,17 @@ def _build_detail_metric_table(self, metrics: list[dict]) -> ft.Column:
     )
 ```
 
-让这两张卡片改走紧凑表格渲染，而 `持仓概览` 继续保留现有 tile。
+并新增一条专用刷新链路，例如：
 
-- [ ] **Step 6: 再跑测试，确认转绿**
+```python
+def _apply_fund_detail_compact_metrics(self, return_raw: dict, ma_raw: dict):
+    self._apply_detail_metric_table(self.detail_return_table, self._build_fund_detail_return_metrics(return_raw))
+    self._apply_detail_metric_table(self.detail_ma_table, self._build_fund_detail_ma_metrics(ma_raw))
+```
+
+然后把 `_clear_view_state()`、`_apply_cached_state()` 和详情数据刷新完成处，从旧的 `self.detail_return_tiles` / `self.detail_ma_tiles` 切换到新的表格控件引用。让这两张卡片改走紧凑表格渲染，而 `持仓概览` 继续保留现有 tile。
+
+- [ ] **Step 7: 再跑测试，确认转绿**
 
 Run:
 
@@ -285,7 +309,7 @@ python -m unittest discover -s tests -p "test_main_page_redesign.py" -v
 
 Expected: 紧凑表格结构、颜色语义和空值稳定性测试通过。
 
-- [ ] **Step 7: 提交 Task 2**
+- [ ] **Step 8: 提交 Task 2**
 
 ```bash
 git add main.py tests/test_main_page_redesign.py
