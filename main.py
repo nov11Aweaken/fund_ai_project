@@ -511,6 +511,120 @@ def fund_history_stats(code: str):
     }
 
 
+def build_dynamic_chart_data(code: str, name: str = "") -> dict:
+    """构造用于页面内动态图的结构化数据契约。"""
+    try:
+        df = fetch_fund_history_data(code)
+        df = df.copy()
+        df["单位净值"] = df["单位净值"].astype(float)
+    except ValueError as exc:
+        if "历史数据为空" in str(exc):
+            raise ValueError("动态K线图历史数据为空") from exc
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
+    except Exception as exc:
+        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
+
+    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist() if not df.empty else []
+    nav_values = df["单位净值"].tolist() if not df.empty else []
+    if not dates or not nav_values:
+        raise ValueError("动态K线图历史数据为空")
+
+    ma_candidates = [5, 10, 20, 30, 60, 120, 250]
+    default_ma_days = [5, 10, 20, 250]
+    title_name = (name or "").strip() or code
+    code_suffix = f"({code})"
+    if title_name.endswith(code_suffix):
+        title_name = title_name[:-len(code_suffix)].strip() or code
+
+    ma_series: dict[str, list[float | None]] = {}
+    for days in ma_candidates:
+        ma_values = df["单位净值"].rolling(window=days).mean().tolist()
+        series: list[float | None] = []
+        for value in ma_values:
+            if pd.isna(value):
+                series.append(None)
+            else:
+                series.append(float(value))
+        ma_series[str(days)] = series
+
+    title = f"{code} 净值走势" if title_name == code else f"{title_name} ({code}) 净值走势"
+
+    return {
+        "title": title,
+        "dates": dates,
+        "nav_values": [float(value) for value in nav_values],
+        "ma_series": ma_series,
+        "ma_candidates": ma_candidates,
+        "default_ma_days": default_ma_days,
+    }
+
+
+def build_dynamic_chart_series(chart_data: dict, selected_days: list[int]) -> list[dict]:
+    ma_candidates = {int(day) for day in chart_data["ma_candidates"]}
+    normalized_days: list[int] = []
+    for day in selected_days:
+        try:
+            day_value = int(day)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"MA 周期无效: {day}") from exc
+        if day_value not in ma_candidates:
+            raise ValueError(f"不支持的 MA 周期: {day_value}")
+        if day_value not in normalized_days:
+            normalized_days.append(day_value)
+
+    series = [
+        {
+            "name": "单位净值",
+            "type": "line",
+            "data": chart_data["nav_values"],
+            "showSymbol": False,
+            "smooth": False,
+            "lineStyle": {"width": 2.5, "color": ACCENT},
+        }
+    ]
+    for day in normalized_days:
+        ma_values = chart_data["ma_series"].get(str(day))
+        if ma_values is None:
+            raise ValueError(f"缺少 MA{day} 数据")
+        series.append(
+            {
+                "name": f"MA{day}",
+                "type": "line",
+                "data": ma_values,
+                "showSymbol": False,
+                "smooth": True,
+                "lineStyle": {"width": 1.2},
+            }
+        )
+    return series
+
+
+def build_dynamic_chart_option(chart_data: dict, selected_days: list[int]) -> dict:
+    series = build_dynamic_chart_series(chart_data, selected_days)
+    return {
+        "animation": False,
+        "legend": {
+            "top": "2%",
+            "data": [item["name"] for item in series],
+        },
+        "tooltip": {"trigger": "axis"},
+        "toolbox": {"feature": {"saveAsImage": {}}},
+        "dataZoom": [
+            {"type": "inside", "start": 75, "end": 100},
+            {"type": "slider", "start": 75, "end": 100, "bottom": "2%"},
+        ],
+        "grid": {"left": 56, "right": 28, "top": 70, "bottom": 78},
+        "xAxis": {
+            "type": "category",
+            "boundaryGap": False,
+            "data": chart_data["dates"],
+            "axisLabel": {"rotate": 35},
+        },
+        "yAxis": {"type": "value", "scale": True},
+        "series": series,
+    }
+
+
 def render_fund_nav_png_bytes(code: str) -> bytes:
     df = fetch_fund_history_data(code)
     dates = df["净值日期"]
