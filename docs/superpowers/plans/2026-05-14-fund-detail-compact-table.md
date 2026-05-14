@@ -85,7 +85,10 @@ Expected: 基线通过；若不通过，先记录问题再继续。
 
 ```python
 def test_build_fund_detail_return_metrics_keeps_four_rows_with_metric_colors(self):
-    dummy_app = types.SimpleNamespace(_metric_color=FletApp._metric_color)
+    dummy_app = types.SimpleNamespace(
+        _format_pct_value=lambda raw_value, signed=True: FletApp._format_pct_value(types.SimpleNamespace(), raw_value, signed=signed),
+        _metric_color=lambda raw_value, default=main.VALUE_TEXT: FletApp._metric_color(types.SimpleNamespace(), raw_value, default=default),
+    )
     metrics = FletApp._build_fund_detail_return_metrics(
         dummy_app,
         {"chg3": 1.2, "chg7": -0.5, "chg15": 0.0, "chg30": None},
@@ -102,17 +105,18 @@ def test_build_fund_detail_return_metrics_keeps_four_rows_with_metric_colors(sel
 ```python
 def test_build_fund_detail_ma_metrics_uses_neutral_percentile_and_distance_driven_ma_colors(self):
     dummy_app = types.SimpleNamespace(
-        _format_pct_value=FletApp._format_pct_value,
-        _format_number_value=FletApp._format_number_value,
-        _metric_color=FletApp._metric_color,
+        _format_pct_value=lambda raw_value, signed=True: FletApp._format_pct_value(types.SimpleNamespace(), raw_value, signed=signed),
+        _format_number_value=lambda raw_value, digits=2, suffix="": FletApp._format_number_value(types.SimpleNamespace(), raw_value, digits=digits, suffix=suffix),
+        _metric_color=lambda raw_value, default=main.VALUE_TEXT: FletApp._metric_color(types.SimpleNamespace(), raw_value, default=default),
     )
     metrics = FletApp._build_fund_detail_ma_metrics(
         dummy_app,
-        {"percentile": 62.4, "ma5": 1.4832, "dist_ma5": 1.18, "ma20": 1.4918, "dist_ma20": -0.52},
+        {"percentile": 62.4, "ma5": 1.4832, "dist_ma5": 1.18, "ma10": None, "dist_ma10": None, "ma20": 1.4918, "dist_ma20": -0.52, "ma250": None, "dist_ma250": None},
     )
     self.assertEqual(metrics[0]["color"], main.VALUE_TEXT)
     self.assertEqual(metrics[1]["color"], main.UP)
     self.assertEqual(metrics[2]["color"], main.SUBTEXT)
+    self.assertEqual(metrics[3]["color"], main.DOWN)
 ```
 
 - [ ] **Step 3: 写失败测试，锁定新的详情页表格行 helper 输出“三列行”结构**
@@ -199,7 +203,7 @@ git commit -m "feat: add detail metric table row helpers"
 def test_build_fund_detail_compact_section_uses_table_rows_instead_of_metric_tiles(self):
     dummy_app = types.SimpleNamespace(
         _module_card=lambda content, padding=14, expand=None: ft.Container(content=content, padding=padding, expand=expand),
-        _build_detail_metric_table=lambda metrics: ft.Column([ft.Text(item["label"]) for item in metrics]),
+        _build_detail_metric_table=lambda metrics: ft.Column([ft.Row([ft.Text(item["label"]), ft.Text(item["subtitle"]), ft.Text(item["value"])]) for item in metrics]),
     )
     card = FletApp._build_detail_compact_section_card(
         dummy_app,
@@ -209,33 +213,48 @@ def test_build_fund_detail_compact_section_uses_table_rows_instead_of_metric_til
     )
     self.assertNotIsInstance(card.content.controls[1], ft.ResponsiveRow)
     self.assertIsInstance(card.content.controls[1], ft.Column)
+    self.assertEqual(card.content.controls[1].controls[0].controls[0].value, "近3日")
 ```
 
-- [ ] **Step 2: 写失败测试，锁定均线区表格结构和 `估值分位` 中性色**
+- [ ] **Step 2: 写失败测试，锁定均线区真实输出为 5 行且顺序符合 spec**
 
 ```python
-def test_build_detail_metric_table_keeps_percentile_neutral_and_ma_rows_colored(self):
+def test_build_detail_metric_table_outputs_five_ma_rows_in_spec_order(self):
+    dummy_app = types.SimpleNamespace(
+        _build_detail_metric_table_row=lambda metric: ft.Row([ft.Text(metric["label"]), ft.Text(metric["subtitle"]), ft.Text(metric["value"])]),
+    )
     table = FletApp._build_detail_metric_table(
-        types.SimpleNamespace(),
+        dummy_app,
         [
             {"label": "估值分位", "subtitle": "近历史区间", "value": "62.40%", "color": main.VALUE_TEXT},
             {"label": "MA5", "subtitle": "偏离 +1.18%", "value": "1.4832", "color": main.UP, "subtitle_color": main.UP},
+            {"label": "MA10", "subtitle": "偏离 --", "value": "--", "color": main.SUBTEXT, "subtitle_color": main.SUBTEXT},
+            {"label": "MA20", "subtitle": "偏离 -0.52%", "value": "1.4918", "color": main.DOWN, "subtitle_color": main.DOWN},
+            {"label": "MA250", "subtitle": "偏离 +8.34%", "value": "1.3865", "color": main.UP, "subtitle_color": main.UP},
+        ],
+    )
+    self.assertEqual([row.controls[0].value for row in table.controls], ["估值分位", "MA5", "MA10", "MA20", "MA250"])
+```
+
+- [ ] **Step 3: 写失败测试，锁定均线区颜色规则和空值稳定性**
+
+```python
+def test_build_detail_metric_table_keeps_percentile_neutral_and_placeholders_stable(self):
+    table = FletApp._build_detail_metric_table(
+        types.SimpleNamespace(
+            _build_detail_metric_table_row=lambda metric: ft.Row(
+                [ft.Text(metric["label"]), ft.Text(metric["subtitle"], color=metric.get("subtitle_color", main.SUBTEXT)), ft.Text(metric["value"], color=metric["color"])]
+            ),
+        ),
+        [
+            {"label": "估值分位", "subtitle": "近历史区间", "value": "62.40%", "color": main.VALUE_TEXT},
+            {"label": "MA20", "subtitle": "偏离 --", "value": "--", "color": main.SUBTEXT, "subtitle_color": main.SUBTEXT},
         ],
     )
     self.assertEqual(table.controls[0].controls[2].color, main.VALUE_TEXT)
-    self.assertEqual(table.controls[1].controls[2].color, main.UP)
-```
-
-- [ ] **Step 3: 写失败测试，锁定空值情况下表格仍稳定输出 `--`**
-
-```python
-def test_build_detail_metric_table_keeps_placeholder_rows_when_values_missing(self):
-    table = FletApp._build_detail_metric_table(
-        types.SimpleNamespace(),
-        [{"label": "MA20", "subtitle": "偏离 --", "value": "--", "color": main.SUBTEXT}],
-    )
-    self.assertEqual(table.controls[0].controls[1].value, "偏离 --")
-    self.assertEqual(table.controls[0].controls[2].value, "--")
+    self.assertEqual(table.controls[1].controls[1].value, "偏离 --")
+    self.assertEqual(table.controls[1].controls[2].value, "--")
+    self.assertEqual(table.controls[1].controls[2].color, main.SUBTEXT)
 ```
 
 - [ ] **Step 4: 写失败测试，锁定详情刷新链路会更新新的表格控件**
@@ -246,12 +265,22 @@ def test_apply_fund_detail_metrics_updates_compact_table_refs(self):
         detail_return_table=ft.Column([]),
         detail_ma_table=ft.Column([]),
         _build_fund_detail_return_metrics=lambda payload: [{"label": "近3日", "subtitle": "短线表现", "value": "+1.82%", "color": main.UP}],
-        _build_fund_detail_ma_metrics=lambda payload: [{"label": "估值分位", "subtitle": "近历史区间", "value": "62.40%", "color": main.VALUE_TEXT}],
-        _apply_detail_metric_table=FletApp._apply_detail_metric_table,
+        _build_fund_detail_ma_metrics=lambda payload: [
+            {"label": "估值分位", "subtitle": "近历史区间", "value": "62.40%", "color": main.VALUE_TEXT},
+            {"label": "MA5", "subtitle": "偏离 +1.18%", "value": "1.4832", "color": main.UP},
+            {"label": "MA10", "subtitle": "偏离 --", "value": "--", "color": main.SUBTEXT},
+            {"label": "MA20", "subtitle": "偏离 -0.52%", "value": "1.4918", "color": main.DOWN},
+            {"label": "MA250", "subtitle": "偏离 +8.34%", "value": "1.3865", "color": main.UP},
+        ],
+        _apply_detail_metric_table=lambda table, metrics: table.controls.extend(
+            [ft.Row([ft.Text(metric["label"]), ft.Text(metric["subtitle"]), ft.Text(metric["value"])]) for metric in metrics]
+        ),
     )
     FletApp._apply_fund_detail_compact_metrics(dummy_app, {"chg3": 1.82}, {"percentile": 62.4})
     self.assertEqual(dummy_app.detail_return_table.controls[0].controls[0].value, "近3日")
     self.assertEqual(dummy_app.detail_ma_table.controls[0].controls[0].value, "估值分位")
+    self.assertEqual(len(dummy_app.detail_ma_table.controls), 5)
+    self.assertEqual(dummy_app.detail_ma_table.controls[4].controls[0].value, "MA250")
 ```
 
 - [ ] **Step 5: 运行测试，确认先失败**
@@ -299,6 +328,8 @@ def _apply_fund_detail_compact_metrics(self, return_raw: dict, ma_raw: dict):
 
 然后把 `_clear_view_state()`、`_apply_cached_state()` 和详情数据刷新完成处，从旧的 `self.detail_return_tiles` / `self.detail_ma_tiles` 切换到新的表格控件引用。让这两张卡片改走紧凑表格渲染，而 `持仓概览` 继续保留现有 tile。
 
+如果 `_build_detail_compact_section_card()` 需要复用当前局部 `detail_section_card`，优先将它提炼为实例方法，避免实现者在局部函数和实例方法之间来回搬运。
+
 - [ ] **Step 7: 再跑测试，确认转绿**
 
 Run:
@@ -322,7 +353,6 @@ git commit -m "feat: render fund detail compact metric tables"
 - Verify: `main.py`
 - Verify: `tests/test_main_page_redesign.py`
 - Verify: `tests/`
-- Modify: `docs/superpowers/plans/2026-05-14-fund-detail-compact-table.md`
 
 - [ ] **Step 1: 跑详情页相关测试**
 
@@ -367,6 +397,6 @@ Expected: “收益区间”和“均线与位置”比原版本更紧凑，红�
 - [ ] **Step 5: 提交 Task 3**
 
 ```bash
-git add main.py tests/test_main_page_redesign.py docs/superpowers/plans/2026-05-14-fund-detail-compact-table.md
+git add main.py tests/test_main_page_redesign.py
 git commit -m "feat: tighten fund detail metric cards"
 ```
