@@ -2844,10 +2844,20 @@ class FletApp:
             spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        primary_text = ft.Text(metric["primary"], color=metric["color"], size=15, weight=ft.FontWeight.W_700)
+        primary_bgcolor = ft.Colors.with_opacity(0.08, metric["color"])
+        primary_border_color = ft.Colors.with_opacity(0.18, metric["color"])
+        primary_capsule = ft.Container(
+            content=primary_text,
+            padding=ft.Padding(10, 4, 10, 4),
+            border_radius=999,
+            bgcolor=primary_bgcolor,
+            border=ft.Border.all(1, primary_border_color),
+        )
         return ft.Row(
             [
                 secondary_group,
-                ft.Text(metric["primary"], color=metric["color"], size=15, weight=ft.FontWeight.W_700),
+                primary_capsule,
             ],
             spacing=14,
             alignment=ft.MainAxisAlignment.END,
