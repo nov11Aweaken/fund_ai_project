@@ -112,11 +112,12 @@ class FundListCardHelperTests(unittest.TestCase):
         self.assertEqual(primary_capsule.bgcolor, ft.Colors.with_opacity(0.08, UP))
         self.assertEqual(primary_capsule.border.left.color, ft.Colors.with_opacity(0.18, UP))
         self.assertEqual(primary_capsule.border.left.width, 1)
+        self.assertEqual(primary_capsule.alignment, ft.Alignment(0, 0))
         self.assertEqual(primary_capsule.border_radius, 999)
         self.assertEqual(primary_capsule.padding.left, 10)
-        self.assertEqual(primary_capsule.padding.top, 4)
+        self.assertEqual(primary_capsule.padding.top, 6)
         self.assertEqual(primary_capsule.padding.right, 10)
-        self.assertEqual(primary_capsule.padding.bottom, 4)
+        self.assertEqual(primary_capsule.padding.bottom, 6)
 
     def test_build_fund_list_market_row_keeps_capsule_when_primary_missing(self):
         row = FletApp._build_fund_list_market_row(

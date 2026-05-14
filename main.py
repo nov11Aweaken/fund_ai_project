@@ -2849,7 +2849,8 @@ class FletApp:
         primary_border_color = ft.Colors.with_opacity(0.18, metric["color"])
         primary_capsule = ft.Container(
             content=primary_text,
-            padding=ft.Padding(10, 4, 10, 4),
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding(10, 6, 10, 6),
             border_radius=999,
             bgcolor=primary_bgcolor,
             border=ft.Border.all(1, primary_border_color),
