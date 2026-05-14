@@ -55,6 +55,28 @@ FONT_CHOICES = {
     "Segoe UI": "Segoe UI",
 }
 FONT_PREF_KEY = "ui_font"
+
+
+def _soft_metric_bg(color: str) -> str:
+    return {
+        UP: "#14FF5252",
+        DOWN: "#144CAF50",
+        ACCENT: "#142196F3",
+        VALUE_TEXT: "#0D111827",
+        SUBTEXT: "#0D111827",
+    }.get(color, "#0D111827")
+
+
+def _soft_metric_border(color: str) -> str:
+    return {
+        UP: "#22FF5252",
+        DOWN: "#224CAF50",
+        ACCENT: "#222196F3",
+        VALUE_TEXT: "#1A111827",
+        SUBTEXT: "#1A111827",
+    }.get(color, "#1A111827")
+
+
 MARKET_INDEX_CONFIGS = [
     {"code": "000001", "name": "上证指数", "category": "上证系列指数"},
     {"code": "000688", "name": "科创50", "category": "上证系列指数"},
@@ -2844,10 +2866,18 @@ class FletApp:
             spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        primary_text = ft.Text(metric["primary"], color=metric["color"], size=15, weight=ft.FontWeight.W_700)
+        primary_capsule = ft.Container(
+            content=primary_text,
+            padding=ft.Padding(10, 4, 10, 4),
+            border_radius=999,
+            bgcolor=_soft_metric_bg(metric["color"]),
+            border=ft.Border.all(1, _soft_metric_border(metric["color"])),
+        )
         return ft.Row(
             [
                 secondary_group,
-                ft.Text(metric["primary"], color=metric["color"], size=15, weight=ft.FontWeight.W_700),
+                primary_capsule,
             ],
             spacing=14,
             alignment=ft.MainAxisAlignment.END,
