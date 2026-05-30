@@ -3,7 +3,7 @@ import unittest
 
 import flet as ft
 
-from main import FletApp, DOWN, SUBTEXT, UP, VALUE_TEXT
+from main import ACCENT, FletApp, DOWN, SUBTEXT, UP, VALUE_TEXT
 
 
 class FundListCardHelperTests(unittest.TestCase):
@@ -229,6 +229,132 @@ class FundListCardHelperTests(unittest.TestCase):
         summary = FletApp._fund_list_sort_summary(dummy_app)
 
         self.assertEqual(summary, "按实时估值降序")
+
+    def test_build_fund_list_copy_button_matches_icon_toolbar_style(self):
+        dummy_app = types.SimpleNamespace(open_fund_list_copy_dialog=lambda e=None: None)
+
+        button = FletApp._build_fund_list_copy_button(dummy_app)
+
+        self.assertIsInstance(button, ft.IconButton)
+        self.assertEqual(button.icon, ft.Icons.CONTENT_COPY)
+        self.assertEqual(button.icon_color, ACCENT)
+        self.assertEqual(button.tooltip, "拷贝基金信息")
+
+    def test_build_fund_list_copy_markdown_returns_markdown_table_with_expected_columns(self):
+        formatter = types.SimpleNamespace()
+        formatter._format_number_value = lambda raw_value, digits=2, suffix="": FletApp._format_number_value(
+            formatter,
+            raw_value,
+            digits=digits,
+            suffix=suffix,
+        )
+        formatter._format_pct_value = lambda raw_value, signed=True: FletApp._format_pct_value(
+            formatter,
+            raw_value,
+            signed=signed,
+        )
+
+        markdown = FletApp._build_fund_list_copy_markdown(
+            formatter,
+            [
+                {"name": "中欧医疗", "code": "003095", "current_nav": 1.2345, "est_pct": -0.56},
+                {"name": "白酒指数", "code": "161725", "current_nav": None, "est_pct": None},
+            ],
+        )
+
+        self.assertEqual(
+            markdown.splitlines(),
+            [
+                "| 基金名称 | 代码 | 当日估值 | 估值涨跌幅 |",
+                "| --- | --- | --- | --- |",
+                "| 中欧医疗 | 003095 | 1.2345 | -0.56% |",
+                "| 白酒指数 | 161725 | -- | -- |",
+            ],
+        )
+
+    def test_open_fund_list_copy_dialog_shows_message_when_no_items(self):
+        messages: list[str] = []
+        dummy_app = types.SimpleNamespace(
+            _fund_list_cache={"items": []},
+            _sort_fund_list_items=lambda items: items,
+            _show_message=lambda message: messages.append(message),
+        )
+
+        FletApp.open_fund_list_copy_dialog(dummy_app)
+
+        self.assertEqual(messages, ["暂无可复制基金"])
+
+    def test_open_fund_list_copy_dialog_builds_unchecked_checkboxes_in_sorted_order(self):
+        dialogs: list[ft.AlertDialog] = []
+        dummy_app = types.SimpleNamespace(
+            _fund_list_cache={
+                "items": [
+                    {"name": "基金A", "code": "000001", "current_nav": 1.1111, "est_pct": 0.1},
+                    {"name": "基金B", "code": "000002", "current_nav": 1.2222, "est_pct": -0.2},
+                ]
+            },
+            _sort_fund_list_items=lambda items: list(reversed(items)),
+            _open_dialog=lambda dialog: dialogs.append(dialog),
+            _show_message=lambda message: None,
+            _format_number_value=lambda raw_value, digits=2, suffix="": FletApp._format_number_value(
+                types.SimpleNamespace(),
+                raw_value,
+                digits=digits,
+                suffix=suffix,
+            ),
+            _format_pct_value=lambda raw_value, signed=True: FletApp._format_pct_value(
+                types.SimpleNamespace(),
+                raw_value,
+                signed=signed,
+            ),
+        )
+
+        FletApp.open_fund_list_copy_dialog(dummy_app)
+
+        self.assertEqual(len(dialogs), 1)
+        self.assertEqual([entry["item"]["code"] for entry in dummy_app._fund_list_copy_entries], ["000002", "000001"])
+        self.assertTrue(all(entry["checkbox"].value is False for entry in dummy_app._fund_list_copy_entries))
+        self.assertEqual(dialogs[0].title.value, "拷贝基金信息")
+
+    def test_on_fund_list_copy_confirm_shows_message_when_nothing_selected(self):
+        messages: list[str] = []
+        dummy_app = types.SimpleNamespace(
+            _fund_list_copy_entries=[
+                {"item": {"code": "000001"}, "checkbox": ft.Checkbox(value=False)},
+                {"item": {"code": "000002"}, "checkbox": ft.Checkbox(value=False)},
+            ],
+            _show_message=lambda message: messages.append(message),
+            _build_fund_list_copy_markdown=lambda items: (_ for _ in ()).throw(AssertionError("不应生成 Markdown")),
+            _queue_clipboard_copy=lambda text: (_ for _ in ()).throw(AssertionError("不应复制")),
+            _close_dialog=lambda: (_ for _ in ()).throw(AssertionError("不应关闭弹窗")),
+        )
+
+        FletApp.on_fund_list_copy_confirm(dummy_app)
+
+        self.assertEqual(messages, ["请至少选择一只基金"])
+
+    def test_on_fund_list_copy_confirm_copies_markdown_and_closes_dialog(self):
+        messages: list[str] = []
+        copied: list[str] = []
+        closed: list[bool] = []
+        built_items: list[list[dict]] = []
+        dummy_app = types.SimpleNamespace(
+            _fund_list_copy_entries=[
+                {"item": {"code": "000001", "name": "基金A"}, "checkbox": ft.Checkbox(value=True)},
+                {"item": {"code": "000002", "name": "基金B"}, "checkbox": ft.Checkbox(value=False)},
+            ],
+            _show_message=lambda message: messages.append(message),
+            _build_fund_list_copy_markdown=lambda items: built_items.append(items) or "| markdown |",
+            _queue_clipboard_copy=lambda text: copied.append(text),
+            _close_dialog=lambda: closed.append(True),
+        )
+
+        FletApp.on_fund_list_copy_confirm(dummy_app)
+
+        self.assertEqual(built_items, [[{"code": "000001", "name": "基金A"}]])
+        self.assertEqual(copied, ["| markdown |"])
+        self.assertEqual(closed, [True])
+        self.assertEqual(messages, ["已复制 1 只基金信息"])
 
 
 if __name__ == "__main__":

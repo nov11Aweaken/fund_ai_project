@@ -1076,6 +1076,8 @@ class FletApp:
         self._pending_fund_list_refresh = False
         self._fund_list_sort_field: str | None = None
         self._fund_list_sort_desc = False
+        self._fund_list_copy_entries: list[dict] = []
+        self._clipboard_service = ft.Clipboard()
 
         # === Market indices view state ===1
         self._market_cache: dict[str, dict] = {}
@@ -1472,6 +1474,7 @@ class FletApp:
             icon_color=ACCENT,
             tooltip="添加基金",
         )
+        self.btn_fund_list_copy = self._build_fund_list_copy_button()
         fund_list_header_row = ft.Column(
             [
                 ft.Row(
@@ -1485,7 +1488,7 @@ class FletApp:
                             expand=True,
                         ),
                         ft.Row(
-                            [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add],
+                            [self.prg_fund_list_loading, self.btn_fund_list_refresh, self.btn_fund_list_add, self.btn_fund_list_copy],
                             spacing=6,
                             alignment=ft.MainAxisAlignment.END,
                         ),
@@ -1721,6 +1724,14 @@ class FletApp:
             dt = dt - timedelta(days=1)
         return f"{dt.month}-{dt.day}净值变化"
 
+    def _build_fund_list_copy_button(self) -> ft.IconButton:
+        return ft.IconButton(
+            ft.Icons.CONTENT_COPY,
+            on_click=self.open_fund_list_copy_dialog,
+            icon_color=ACCENT,
+            tooltip="拷贝基金信息",
+        )
+
     def _set_tab_selected(self, tab: str):
         self.active_tab = tab
         is_fund = tab == "fund"
@@ -1920,6 +1931,90 @@ class FletApp:
         # Visible feedback to confirm click event is firing.
         self._show_message("正在打开添加窗口...")
         self.open_add_fund_input_dialog(e)
+
+    def open_fund_list_copy_dialog(self, e=None):
+        items = list((self._fund_list_cache or {}).get("items") or [])
+        render_items = self._sort_fund_list_items(items)
+        if not render_items:
+            self._show_message("暂无可复制基金")
+            return
+
+        copy_entries: list[dict] = []
+        checkbox_controls: list[ft.Control] = []
+        for item in render_items:
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip() or code
+            nav_text = self._format_number_value(item.get("current_nav"), digits=4)
+            pct_text = self._format_pct_value(item.get("est_pct"))
+            checkbox = ft.Checkbox(
+                value=False,
+                label=f"{name} ({code})  估值 {nav_text} / {pct_text}",
+            )
+            copy_entries.append({"item": dict(item), "checkbox": checkbox})
+            checkbox_controls.append(checkbox)
+
+        self._fund_list_copy_entries = copy_entries
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("拷贝基金信息"),
+            content=ft.Column(
+                [
+                    ft.Text("请选择要复制到 Markdown 表格的基金。", color=SUBTEXT, size=12),
+                    ft.Container(
+                        content=ft.Column(checkbox_controls, spacing=8, tight=True, scroll=ft.ScrollMode.AUTO),
+                        width=420,
+                        height=320,
+                    ),
+                ],
+                tight=True,
+                spacing=10,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                ft.Button("确定", on_click=lambda ev: FletApp.on_fund_list_copy_confirm(self, ev)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_fund_list_copy_confirm(self, e=None):
+        entries = list(getattr(self, "_fund_list_copy_entries", []) or [])
+        selected_items = [dict(entry.get("item") or {}) for entry in entries if bool(getattr(entry.get("checkbox"), "value", False))]
+        if not selected_items:
+            self._show_message("请至少选择一只基金")
+            return
+
+        markdown = self._build_fund_list_copy_markdown(selected_items)
+        self._queue_clipboard_copy(markdown)
+        self._close_dialog()
+        self._show_message(f"已复制 {len(selected_items)} 只基金信息")
+
+    def _build_fund_list_copy_markdown(self, items: list[dict]) -> str:
+        lines = [
+            "| 基金名称 | 代码 | 当日估值 | 估值涨跌幅 |",
+            "| --- | --- | --- | --- |",
+        ]
+        for item in items:
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip() or code
+            nav_text = self._format_number_value(item.get("current_nav"), digits=4)
+            pct_text = self._format_pct_value(item.get("est_pct"))
+            lines.append(f"| {name} | {code} | {nav_text} | {pct_text} |")
+        return "\n".join(lines)
+
+    def _queue_clipboard_copy(self, text: str):
+        self._safe_run_task(self._copy_text_to_clipboard, text)
+
+    async def _copy_text_to_clipboard(self, text: str):
+        try:
+            clipboard = getattr(self, "_clipboard_service", None)
+            if clipboard is None:
+                clipboard = ft.Clipboard()
+                self._clipboard_service = clipboard
+            await clipboard.set(text)
+        except Exception as exc:
+            LOGGER.exception("复制基金 Markdown 失败")
+            self._show_message(f"复制失败：{exc}")
 
     def open_add_fund_input_dialog(self, e=None):
         LOGGER.info("点击添加基金按钮")
@@ -2684,6 +2779,7 @@ class FletApp:
     async def _set_fund_list_loading(self, loading: bool):
         self.prg_fund_list_loading.visible = loading
         self.btn_fund_list_refresh.disabled = loading
+        self.btn_fund_list_copy.disabled = loading
         if loading:
             last = self._fund_list_cache.get("last_fetch_time")
             self.txt_fund_list_page_info.value = f"第 1/1 页 · 拉取中... | 上次更新 {last}" if last else "第 1/1 页 · 拉取中..."
