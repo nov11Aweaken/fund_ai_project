@@ -470,6 +470,103 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertEqual(panel.scroll, ft.ScrollMode.AUTO)
         self.assertTrue(panel.expand)
 
+    def test_build_recent_nav_change_rows_returns_latest_dates_first_within_window(self):
+        df = pd.DataFrame(
+            {
+                "净值日期": pd.to_datetime(
+                    [
+                        "2024-01-01",
+                        "2024-01-02",
+                        "2024-01-03",
+                        "2024-01-04",
+                        "2024-01-05",
+                        "2024-01-08",
+                        "2024-01-09",
+                        "2024-01-10",
+                    ]
+                ),
+                "单位净值": [1.0, 1.1, 1.21, 1.2, 1.26, 1.323, 1.3, 1.365],
+                "累计净值": [1.0, 1.12, 1.25, 1.24, 1.31, 1.38, 1.36, 1.43],
+            }
+        )
+
+        rows = main.build_recent_nav_change_rows(df, 7)
+
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows[0]["date"], "2024-01-10")
+        self.assertAlmostEqual(rows[0]["daily_pct"], 5.0)
+        self.assertAlmostEqual(rows[0]["unit_nav"], 1.365)
+        self.assertAlmostEqual(rows[0]["accumulated_nav"], 1.43)
+        self.assertEqual(rows[-1]["date"], "2024-01-02")
+        self.assertAlmostEqual(rows[-1]["daily_pct"], 10.0)
+
+    def test_build_recent_nav_change_rows_returns_empty_when_history_missing(self):
+        empty = pd.DataFrame(columns=["净值日期", "单位净值", "累计净值"])
+
+        self.assertEqual(main.build_recent_nav_change_rows(empty, 15), [])
+
+    def test_build_recent_nav_change_rows_uses_only_actual_change_entries_when_history_short(self):
+        df = pd.DataFrame(
+            {
+                "净值日期": pd.to_datetime(["2024-01-02", "2024-01-05", "2024-01-09"]),
+                "单位净值": [1.0, 1.1, 1.045],
+                "累计净值": [1.0, 1.12, 1.08],
+            }
+        )
+
+        rows = main.build_recent_nav_change_rows(df, 7)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["date"] for row in rows], ["2024-01-09", "2024-01-05"])
+        self.assertAlmostEqual(rows[0]["daily_pct"], -5.0)
+        self.assertAlmostEqual(rows[1]["daily_pct"], 10.0)
+
+    def test_fetch_fund_history_data_deduplicates_accumulated_nav_dates_before_merge(self):
+        unit_df = pd.DataFrame(
+            {
+                "净值日期": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                "单位净值": [1.0, 1.1, 1.21],
+            }
+        )
+        accumulated_df = pd.DataFrame(
+            {
+                "净值日期": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-03", "2024-01-04"]),
+                "累计净值": [1.0, 1.12, 1.12, 1.25],
+            }
+        )
+
+        with mock.patch.object(
+            main.ak,
+            "fund_open_fund_info_em",
+            side_effect=[unit_df, accumulated_df],
+        ):
+            history_df = main.fetch_fund_history_data("110022")
+
+        rows = main.build_recent_nav_change_rows(history_df, 7)
+
+        self.assertEqual(history_df["净值日期"].dt.strftime("%Y-%m-%d").tolist(), ["2024-01-02", "2024-01-03", "2024-01-04"])
+        self.assertEqual([row["date"] for row in rows], ["2024-01-04", "2024-01-03"])
+        self.assertTrue(all(row["daily_pct"] != 0.0 for row in rows))
+
+    def test_build_recent_nav_change_rows_returns_empty_when_only_one_nav_point_available(self):
+        df = pd.DataFrame(
+            {
+                "净值日期": pd.to_datetime(["2024-01-02"]),
+                "单位净值": [1.0],
+                "累计净值": [1.0],
+            }
+        )
+
+        self.assertEqual(main.build_recent_nav_change_rows(df, 7), [])
+
+    def test_build_nav_history_card_data_uses_placeholder_when_selected_window_empty(self):
+        card_data = main.build_nav_history_card_data({7: [], 15: []}, 7)
+
+        self.assertEqual(card_data["selected_window"], 7)
+        self.assertEqual(card_data["rows"], [])
+        self.assertEqual(card_data["empty_hint"], "暂无最近净值记录")
+        self.assertEqual(card_data["window_options"], [7, 15])
+
 
     def test_build_dynamic_chart_data_nan_keys_and_none_and_json_roundtrip(self):
         dates = pd.date_range("2020-01-01", periods=6, freq="D")

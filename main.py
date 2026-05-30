@@ -76,6 +76,8 @@ HEADERS = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0
 EM_HEADERS = {"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
 REFRESH_MS = 300000  # 5分钟自动刷新
 DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
+DETAIL_NAV_HISTORY_WINDOWS = [7, 15]
+DETAIL_NAV_HISTORY_EMPTY_HINT = "暂无最近净值记录"
 
 
 def build_market_placeholder_items() -> list[dict]:
@@ -430,13 +432,90 @@ def fetch_fund_history_data(code: str):
 
     try:
         df = df.dropna(subset=["单位净值"]).copy()
+        df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
         df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
-        df = df.dropna(subset=["净值日期"])
+        df = df.dropna(subset=["净值日期", "单位净值"])
+        df["累计净值"] = None
+        try:
+            accumulated_df = ak.fund_open_fund_info_em(symbol=code, indicator="累计净值走势")
+            if accumulated_df is not None and not accumulated_df.empty and {"净值日期", "累计净值"}.issubset(accumulated_df.columns):
+                accumulated_df = accumulated_df[["净值日期", "累计净值"]].copy()
+                accumulated_df["净值日期"] = pd.to_datetime(accumulated_df["净值日期"], errors="coerce")
+                accumulated_df["累计净值"] = pd.to_numeric(accumulated_df["累计净值"], errors="coerce")
+                accumulated_df = accumulated_df.dropna(subset=["净值日期"])
+                accumulated_df = accumulated_df.drop_duplicates(subset=["净值日期"], keep="last")
+                df = df.merge(accumulated_df, on="净值日期", how="left", suffixes=("", "_history"))
+                if "累计净值_history" in df.columns:
+                    df["累计净值"] = df["累计净值_history"]
+                    df.drop(columns=["累计净值_history"], inplace=True)
+        except Exception:
+            pass
         df.sort_values("净值日期", inplace=True)
     except Exception as exc:
         raise ValueError(f"基金历史数据解析失败: {exc}")
 
     return df
+
+
+def build_recent_nav_change_rows(df: pd.DataFrame, window: int) -> list[dict]:
+    if window <= 0:
+        raise ValueError("最近净值窗口必须大于 0")
+    if df is None or df.empty:
+        return []
+    if "净值日期" not in df.columns or "单位净值" not in df.columns:
+        raise ValueError("基金历史数据缺少必要字段")
+
+    history_df = df.copy()
+    history_df["净值日期"] = pd.to_datetime(history_df["净值日期"], errors="coerce")
+    history_df["单位净值"] = pd.to_numeric(history_df["单位净值"], errors="coerce")
+    if "累计净值" in history_df.columns:
+        history_df["累计净值"] = pd.to_numeric(history_df["累计净值"], errors="coerce")
+    else:
+        history_df["累计净值"] = None
+    history_df = history_df.dropna(subset=["净值日期", "单位净值"])
+    history_df.sort_values("净值日期", inplace=True)
+    if history_df.empty:
+        return []
+
+    previous_nav = history_df["单位净值"].shift(1)
+    history_df["日涨跌幅"] = ((history_df["单位净值"] - previous_nav) / previous_nav * 100).where(previous_nav != 0)
+
+    rows: list[dict] = []
+    recent_change_df = history_df.dropna(subset=["日涨跌幅"]).tail(window)
+    recent_change_df = recent_change_df.sort_values("净值日期", ascending=False)
+    for _, item in recent_change_df.iterrows():
+        accumulated_nav = item.get("累计净值")
+        daily_pct = item.get("日涨跌幅")
+        rows.append(
+            {
+                "date": item["净值日期"].strftime("%Y-%m-%d"),
+                "unit_nav": float(item["单位净值"]),
+                "accumulated_nav": None if pd.isna(accumulated_nav) else float(accumulated_nav),
+                "daily_pct": None if pd.isna(daily_pct) else float(daily_pct),
+            }
+        )
+    return rows
+
+
+def build_nav_history_card_data(history_windows: dict | None, selected_window: int) -> dict:
+    if selected_window not in DETAIL_NAV_HISTORY_WINDOWS:
+        raise ValueError(f"不支持的净值窗口: {selected_window}")
+
+    normalized_windows: dict[int, list[dict]] = {}
+    raw_windows = history_windows if isinstance(history_windows, dict) else {}
+    for window in DETAIL_NAV_HISTORY_WINDOWS:
+        rows = raw_windows.get(window)
+        if rows is None:
+            rows = raw_windows.get(str(window))
+        normalized_windows[window] = rows if isinstance(rows, list) else []
+
+    rows = normalized_windows[selected_window]
+    return {
+        "window_options": DETAIL_NAV_HISTORY_WINDOWS.copy(),
+        "selected_window": selected_window,
+        "rows": rows,
+        "empty_hint": "" if rows else DETAIL_NAV_HISTORY_EMPTY_HINT,
+    }
 
 
 def fund_history_stats(code: str):
@@ -495,6 +574,7 @@ def fund_history_stats(code: str):
         "chg7": pct_change(7),
         "chg15": pct_change(15),
         "chg30": pct_change(30),
+        "nav_history": {window: build_recent_nav_change_rows(df, window) for window in DETAIL_NAV_HISTORY_WINDOWS},
         "ma5": ma5,
         "ma10": ma10,
         "ma20": ma20,
@@ -1078,6 +1158,19 @@ class FletApp:
             self._create_metric_tile("MA20"),
             self._create_metric_tile("MA250"),
         ]
+        self.detail_nav_history_window = 7
+        self.detail_nav_history_raw = {window: [] for window in DETAIL_NAV_HISTORY_WINDOWS}
+        self.btn_detail_nav_history_7 = ft.Button(
+            "最近7次",
+            on_click=lambda e: self._set_detail_nav_history_window(7),
+        )
+        self.btn_detail_nav_history_15 = ft.Button(
+            "最近15次",
+            on_click=lambda e: self._set_detail_nav_history_window(15),
+        )
+        self.detail_nav_history_body = ft.Column(spacing=8)
+        self._refresh_detail_nav_history_window_buttons()
+        self._render_detail_nav_history()
 
         # Embedded chart area: static images only
         self.chart_img = ft.Image(src=b"", visible=False, expand=True, fit=ft.BoxFit.CONTAIN)
@@ -1159,7 +1252,7 @@ class FletApp:
                 ft.Column(
                     [
                         self.txt_header_title,
-                        ft.Text("先看价格和盈亏概览，再看收益区间、均线和图表。", color=SUBTEXT, size=12),
+                        ft.Text("先看价格和盈亏概览，再看收益区间、净值涨跌、持仓和均线图表。", color=SUBTEXT, size=12),
                     ],
                     spacing=6,
                     expand=True,
@@ -1270,6 +1363,30 @@ class FletApp:
             "聚焦短中期收益表现，便于快速判断趋势强弱。",
             self.detail_return_tiles,
         )
+        nav_history_section = module_card(
+            ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Column(
+                                [
+                                    ft.Text("最近净值涨跌", color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                                    ft.Text("按最近净值更新日查看最近 7/15 次的单位净值变化。", color=SUBTEXT, size=12),
+                                ],
+                                spacing=4,
+                                expand=True,
+                            ),
+                            ft.Row([self.btn_detail_nav_history_7, self.btn_detail_nav_history_15], spacing=8),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    self.detail_nav_history_body,
+                ],
+                spacing=12,
+            ),
+            padding=14,
+        )
         ma_section = detail_section_card(
             "均线与位置",
             "查看估值分位与偏离均线位置，辅助判断所处区间。",
@@ -1277,7 +1394,7 @@ class FletApp:
         )
 
         detail_metrics_column = ft.Column(
-            [holding_section, returns_section, ma_section],
+            [returns_section, nav_history_section, holding_section, ma_section],
             spacing=14,
             expand=True,
         )
@@ -2622,6 +2739,96 @@ class FletApp:
             run_spacing=12,
         )
 
+    def _detail_nav_history_button_style(self, active: bool) -> ft.ButtonStyle:
+        return ft.ButtonStyle(
+            padding=ft.Padding(12, 8, 12, 8),
+            shape=ft.RoundedRectangleBorder(radius=999),
+            bgcolor={ft.ControlState.DEFAULT: (ACCENT if active else SURFACE)},
+            color={ft.ControlState.DEFAULT: (VALUE_TEXT if active else SUBTEXT)},
+            side={ft.ControlState.DEFAULT: ft.BorderSide(1, "#162196F3" if active else "#14000000")},
+            overlay_color={ft.ControlState.HOVERED: "#102196F3"},
+        )
+
+    def _refresh_detail_nav_history_window_buttons(self):
+        self.btn_detail_nav_history_7.style = self._detail_nav_history_button_style(self.detail_nav_history_window == 7)
+        self.btn_detail_nav_history_15.style = self._detail_nav_history_button_style(self.detail_nav_history_window == 15)
+
+    def _normalize_detail_nav_history_raw(self, raw: dict | None) -> dict[int, list[dict]]:
+        normalized: dict[int, list[dict]] = {}
+        source = raw if isinstance(raw, dict) else {}
+        for window in DETAIL_NAV_HISTORY_WINDOWS:
+            rows = source.get(window)
+            if rows is None:
+                rows = source.get(str(window))
+            normalized[window] = rows if isinstance(rows, list) else []
+        return normalized
+
+    def _build_detail_nav_history_row(self, row: dict, *, header: bool = False) -> ft.Container:
+        if header:
+            columns = [
+                ("日期", SUBTEXT, 2),
+                ("单位净值", SUBTEXT, 2),
+                ("累计净值", SUBTEXT, 2),
+                ("当日涨跌幅", SUBTEXT, 2),
+            ]
+            bgcolor = "#0D111827"
+            border_color = "#00000000"
+        else:
+            columns = [
+                (str(row.get("date") or "--"), TEXT, 2),
+                (self._format_number_value(row.get("unit_nav"), digits=4), VALUE_TEXT, 2),
+                (self._format_number_value(row.get("accumulated_nav"), digits=4), VALUE_TEXT if row.get("accumulated_nav") is not None else SUBTEXT, 2),
+                (self._format_pct_value(row.get("daily_pct")), self._metric_color(row.get("daily_pct")), 2),
+            ]
+            bgcolor = SURFACE
+            border_color = "#14000000"
+
+        content = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Text(
+                        value,
+                        color=color,
+                        size=11 if header else 12,
+                        weight=ft.FontWeight.W_600 if header else ft.FontWeight.W_500,
+                        font_family=FONT_MONO if index > 0 and not header else None,
+                    ),
+                    expand=expand,
+                    alignment=ft.Alignment(-1 if index == 0 else 1, 0),
+                )
+                for index, (value, color, expand) in enumerate(columns)
+            ],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        return ft.Container(
+            content=content,
+            padding=ft.Padding(10, 8, 10, 8),
+            border_radius=10,
+            bgcolor=bgcolor,
+            border=ft.Border.all(1, border_color),
+        )
+
+    def _render_detail_nav_history(self, raw: dict | None = None):
+        if raw is not None:
+            self.detail_nav_history_raw = self._normalize_detail_nav_history_raw(raw)
+        card_data = build_nav_history_card_data(self.detail_nav_history_raw, self.detail_nav_history_window)
+        self._refresh_detail_nav_history_window_buttons()
+        controls: list[ft.Control] = []
+        if card_data["rows"]:
+            controls.append(self._build_detail_nav_history_row({}, header=True))
+            controls.extend(self._build_detail_nav_history_row(row) for row in card_data["rows"])
+        else:
+            controls.append(ft.Text(card_data["empty_hint"], color=SUBTEXT, size=12))
+        self.detail_nav_history_body.controls = controls
+
+    def _set_detail_nav_history_window(self, window: int):
+        if window not in DETAIL_NAV_HISTORY_WINDOWS:
+            return
+        self.detail_nav_history_window = window
+        self._render_detail_nav_history()
+        self.page.update()
+
     def _build_fund_detail_panel(self, content: ft.Control) -> ft.Column:
         return ft.Column(
             [content],
@@ -2907,6 +3114,7 @@ class FletApp:
                 {"percentile": None, "ma5": None, "ma10": None, "ma20": None, "ma250": None, "dist_ma5": None, "dist_ma10": None, "dist_ma20": None, "dist_ma250": None}
             ),
         )
+        self._render_detail_nav_history({window: [] for window in DETAIL_NAV_HISTORY_WINDOWS})
 
         self.chart_img.visible = False
         self.chart_img.src = b""
@@ -2935,6 +3143,7 @@ class FletApp:
             self.detail_ma_tiles,
             self._build_fund_detail_ma_metrics(st.get("detail_ma_raw") or {}),
         )
+        self._render_detail_nav_history(st.get("detail_nav_history_raw"))
 
         png = st.get("chart_png")
         if isinstance(png, (bytes, bytearray)) and len(png) > 0:
@@ -3186,6 +3395,7 @@ class FletApp:
             "dist_ma20": dist20_raw,
             "dist_ma250": dist250_raw,
         }
+        detail_nav_history_raw = self._normalize_detail_nav_history_raw(res.get("nav_history"))
 
         st = self._cache.setdefault(cache_key, {})
         st.update(
@@ -3198,6 +3408,7 @@ class FletApp:
                 "detail_holding_raw": holding_item,
                 "detail_return_raw": detail_return_raw,
                 "detail_ma_raw": detail_ma_raw,
+                "detail_nav_history_raw": detail_nav_history_raw,
                 "last_fetch_time": fetch_time,
             }
         )
@@ -3214,6 +3425,7 @@ class FletApp:
         self._apply_metric_group(self.detail_holding_tiles, self._build_fund_detail_holding_metrics(holding_item))
         self._apply_metric_group(self.detail_return_tiles, self._build_fund_detail_return_metrics(detail_return_raw))
         self._apply_metric_group(self.detail_ma_tiles, self._build_fund_detail_ma_metrics(detail_ma_raw))
+        self._render_detail_nav_history(detail_nav_history_raw)
         self.page.update()
 
     def _start_chart_render(self, cache_key: str, tgt: dict):
