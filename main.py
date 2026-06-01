@@ -1998,7 +1998,7 @@ class FletApp:
             code = str(item.get("code") or "").strip()
             name = str(item.get("name") or "").strip() or code
             nav_text = self._format_number_value(item.get("current_nav"), digits=4)
-            pct_text = self._format_pct_value(item.get("est_pct"))
+            pct_text = FletApp._format_markdown_pct_value(self, item.get("est_pct"))
             lines.append(f"| {name} | {code} | {nav_text} | {pct_text} |")
         return "\n".join(lines)
 
@@ -2949,6 +2949,13 @@ class FletApp:
         if signed:
             return f"{'+' if value > 0 else ''}{value:.2f}%"
         return f"{value:.2f}%"
+
+    def _format_markdown_pct_value(self, raw_value) -> str:
+        pct_text = FletApp._format_pct_value(self, raw_value)
+        if pct_text == "--":
+            return pct_text
+        color = FletApp._metric_color(self, raw_value, default=SUBTEXT)
+        return f"<span style=\"color:{color};\">{pct_text}</span>"
 
     def _format_number_value(self, raw_value, *, digits: int = 2, suffix: str = "") -> str:
         if raw_value is None:

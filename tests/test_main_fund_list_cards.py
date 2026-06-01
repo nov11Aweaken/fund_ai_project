@@ -267,8 +267,42 @@ class FundListCardHelperTests(unittest.TestCase):
             [
                 "| 基金名称 | 代码 | 当日估值 | 估值涨跌幅 |",
                 "| --- | --- | --- | --- |",
-                "| 中欧医疗 | 003095 | 1.2345 | -0.56% |",
+                f"| 中欧医疗 | 003095 | 1.2345 | <span style=\"color:{DOWN};\">-0.56%</span> |",
                 "| 白酒指数 | 161725 | -- | -- |",
+            ],
+        )
+
+    def test_build_fund_list_copy_markdown_colors_pct_cell_by_value_direction(self):
+        formatter = types.SimpleNamespace()
+        formatter._format_number_value = lambda raw_value, digits=2, suffix="": FletApp._format_number_value(
+            formatter,
+            raw_value,
+            digits=digits,
+            suffix=suffix,
+        )
+        formatter._format_pct_value = lambda raw_value, signed=True: FletApp._format_pct_value(
+            formatter,
+            raw_value,
+            signed=signed,
+        )
+
+        markdown = FletApp._build_fund_list_copy_markdown(
+            formatter,
+            [
+                {"name": "上涨基金", "code": "000001", "current_nav": 1.1111, "est_pct": 1.23},
+                {"name": "下跌基金", "code": "000002", "current_nav": 1.2222, "est_pct": -2.34},
+                {"name": "持平基金", "code": "000003", "current_nav": 1.3333, "est_pct": 0},
+                {"name": "缺失基金", "code": "000004", "current_nav": 1.4444, "est_pct": None},
+            ],
+        )
+
+        self.assertEqual(
+            markdown.splitlines()[2:],
+            [
+                f"| 上涨基金 | 000001 | 1.1111 | <span style=\"color:{UP};\">+1.23%</span> |",
+                f"| 下跌基金 | 000002 | 1.2222 | <span style=\"color:{DOWN};\">-2.34%</span> |",
+                f"| 持平基金 | 000003 | 1.3333 | <span style=\"color:{SUBTEXT};\">0.00%</span> |",
+                "| 缺失基金 | 000004 | 1.4444 | -- |",
             ],
         )
 
