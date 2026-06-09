@@ -1574,6 +1574,13 @@ class FletApp:
             tooltip="刷新大盘行情",
         )
 
+        self.btn_market_copy = ft.IconButton(
+            ft.Icons.CONTENT_COPY,
+            on_click=self.open_market_copy_dialog,
+            icon_color=ACCENT,
+            tooltip="复制行情到 Markdown",
+        )
+
         self.btn_market_prev = ft.IconButton(
             ft.Icons.CHEVRON_LEFT,
             tooltip="上一页",
@@ -1615,7 +1622,7 @@ class FletApp:
                             spacing=4,
                             expand=True,
                 ),
-                ft.Row([self.prg_market_loading, self.txt_market_time, self.btn_market_refresh], spacing=8),
+                ft.Row([self.prg_market_loading, self.txt_market_time, self.btn_market_copy, self.btn_market_refresh], spacing=8),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1931,6 +1938,92 @@ class FletApp:
         # Visible feedback to confirm click event is firing.
         self._show_message("正在打开添加窗口...")
         self.open_add_fund_input_dialog(e)
+
+    def open_market_copy_dialog(self, e=None):
+        items = list((self._market_cache or {}).get("items") or [])
+        if not items:
+            self._show_message("暂无可复制行情")
+            return
+
+        copy_entries: list[dict] = []
+        checkbox_controls: list[ft.Control] = []
+        for item in items:
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip() or code
+            price = item.get("price")
+            chg = item.get("chg")
+            pct = item.get("pct")
+            
+            price_text = f"{float(price):.2f}" if price is not None else "--"
+            chg_text = f"{float(chg):+.2f}" if chg is not None else "--"
+            pct_text = f"{float(pct):+.2f}%" if pct is not None else "--"
+            
+            checkbox = ft.Checkbox(
+                value=False,
+                label=f"{name} ({code})  {price_text} / {chg_text} / {pct_text}",
+            )
+            copy_entries.append({"item": dict(item), "checkbox": checkbox})
+            checkbox_controls.append(checkbox)
+
+        self._market_copy_entries = copy_entries
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("拷贝行情信息"),
+            content=ft.Column(
+                [
+                    ft.Text("请选择要复制到 Markdown 表格的行情。", color=SUBTEXT, size=12),
+                    ft.Container(
+                        content=ft.Column(checkbox_controls, spacing=8, tight=True, scroll=ft.ScrollMode.AUTO),
+                        width=420,
+                        height=320,
+                    ),
+                ],
+                tight=True,
+                spacing=10,
+            ),
+            actions=[
+                ft.TextButton("取消", on_click=lambda ev: self._close_dialog()),
+                ft.Button("确定", on_click=lambda ev: FletApp.on_market_copy_confirm(self, ev)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._open_dialog(dialog)
+
+    def on_market_copy_confirm(self, e=None):
+        entries = list(getattr(self, "_market_copy_entries", []) or [])
+        selected_items = [dict(entry.get("item") or {}) for entry in entries if bool(getattr(entry.get("checkbox"), "value", False))]
+        if not selected_items:
+            self._show_message("请至少选择一条行情")
+            return
+
+        markdown = self._build_market_copy_markdown(selected_items)
+        self._queue_clipboard_copy(markdown)
+        self._close_dialog()
+        self._show_message(f"已复制 {len(selected_items)} 条行情信息")
+
+    def _build_market_copy_markdown(self, items: list[dict]) -> str:
+        lines = [
+            "| 指数名称 | 代码 | 最新价 | 涨跌 | 涨跌幅 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for item in items:
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip() or code
+            price = item.get("price")
+            chg = item.get("chg")
+            pct = item.get("pct")
+            
+            price_text = f"{float(price):.2f}" if price is not None else "--"
+            chg_text = f"{float(chg):+.2f}" if chg is not None else "--"
+            pct_value = float(pct) if pct is not None else None
+            
+            if pct_value is not None:
+                pct_text = FletApp._format_markdown_pct_value(self, pct_value)
+            else:
+                pct_text = "--"
+            
+            lines.append(f"| {name} | {code} | {price_text} | {chg_text} | {pct_text} |")
+        return "\n".join(lines)
 
     def open_fund_list_copy_dialog(self, e=None):
         items = list((self._fund_list_cache or {}).get("items") or [])
