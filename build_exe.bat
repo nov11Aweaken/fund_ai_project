@@ -10,6 +10,15 @@ echo ==========================================
 echo           One-Click EXE Builder
 echo ==========================================
 echo [INFO] Python: %PY_CMD%
+
+REM Clean up running main.exe processes to avoid file lock issues
+echo [INFO] Checking for running processes...
+tasklist | find /i "main.exe" >nul 2>nul
+if not errorlevel 1 (
+  echo [INFO] Found running main.exe, terminating...
+  taskkill /IM main.exe /F >nul 2>nul
+  timeout /t 1 /nobreak >nul
+)
 set /p EXE_NAME=Enter output EXE name (without .exe): 
 
 if "%EXE_NAME%"=="" (
