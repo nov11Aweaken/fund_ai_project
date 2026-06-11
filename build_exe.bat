@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "EXIT_CODE=0"
@@ -19,13 +19,37 @@ if not errorlevel 1 (
   taskkill /IM main.exe /F >nul 2>nul
   timeout /t 1 /nobreak >nul
 )
-set /p EXE_NAME=Enter output EXE name (without .exe): 
 
-if "%EXE_NAME%"=="" (
-  echo [ERROR] Name cannot be empty.
+REM Get current date in YYYYMMDD format
+REM Supports both English and localized date formats
+for /f "tokens=1-4 delims=/- " %%a in ('wmic os get LocalDateTime ^| find "20"') do (
+  set "DATE_STR=%%a"
+)
+
+if "!DATE_STR!"=="" (
+  REM Fallback to alternative method
+  for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (
+    set "mm=%%a"
+    set "dd=%%b"
+    set "yyyy=%%c"
+  )
+  set "DATE_STR=!yyyy!!mm!!dd!"
+)
+
+echo.
+echo ==========================================
+echo FILE NAME FORMAT: 基你太美_!DATE_STR!_[YOUR_INPUT].exe
+echo ==========================================
+echo.
+set /p USER_INPUT=Enter the suffix for EXE name (no .exe needed): 
+
+if "!USER_INPUT!"=="" (
+  echo [ERROR] The suffix cannot be empty.
   set "EXIT_CODE=1"
   goto :end
 )
+
+set "EXE_NAME=基你太美_!DATE_STR!_!USER_INPUT!"
 
 where python >nul 2>nul
 if errorlevel 1 (
@@ -72,14 +96,18 @@ if not exist ".\dist\main.exe" (
   goto :end
 )
 
-copy /Y ".\dist\main.exe" ".\dist\%EXE_NAME%.exe" >nul
+copy /Y ".\dist\main.exe" ".\dist\!EXE_NAME!.exe" >nul
 if errorlevel 1 (
-  echo [ERROR] Failed to create named EXE.
+  echo [ERROR] 文件复制失败。
   set "EXIT_CODE=1"
   goto :end
 )
 
-echo [DONE] Created: .\dist\%EXE_NAME%.exe
+echo.
+echo ==========================================
+echo [✓ 完成] 生成文件: .\dist\!EXE_NAME!.exe
+echo ==========================================
+echo.
 
 :end
 endlocal
