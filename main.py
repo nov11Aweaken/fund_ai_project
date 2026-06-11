@@ -207,125 +207,81 @@ def _save_font_pref(font_family: str):
 
 
 def fetch_cn_indices(configs: list[dict] | None = None):
-    """Fetch common CN indices spot data from Eastmoney with code-first matching."""
-
-    def _to_float(v):
+    """使用 AkShare 获取中国市场指数实时行情数据，支持重试"""
+    
+    retry_delays = [1, 2, 3]
+    last_exc = None
+    
+    for attempt in range(len(retry_delays) + 1):
         try:
-            return float(v)
-        except Exception:
-            return None
-
-    def _request_json(url: str, params: dict, *, bypass_env_proxy: bool = False) -> dict:
-        request_kwargs = {"params": params, "headers": EM_HEADERS, "timeout": 8}
-        if bypass_env_proxy:
-            with _without_proxy_env():
-                session = requests.Session()
-                session.trust_env = False
-                resp = session.get(url, **request_kwargs)
-        else:
-            resp = requests.get(url, **request_kwargs)
-        resp.raise_for_status()
-        data_json = resp.json()
-        if not isinstance(data_json, dict):
-            raise ValueError("Eastmoney 返回格式异常")
-        return data_json
-
-    def _candidate_secids(code: str, category: str) -> list[str]:
-        if category == "上证系列指数":
-            return [f"1.{code}", f"2.{code}"]
-        if category == "深证系列指数":
-            return [f"0.{code}", f"47.{code}"]
-        if category == "中证系列指数":
-            return [f"1.{code}", f"2.{code}", f"0.{code}"]
-        if category == "北证系列指数":
-            return [f"0.{code}", f"47.{code}", f"1.{code}"]
-        return [f"1.{code}", f"0.{code}", f"2.{code}", f"47.{code}"]
-
-    def _fetch_index_quote(config: dict) -> dict:
-        url = "https://push2.eastmoney.com/api/qt/stock/get"
-        params_template = {
-            "fltt": "2",
-            "invt": "2",
-            "fields": "f43,f57,f58,f169,f170",
-        }
-        retry_delays = [0.5]
-        last_err = None
-
-        for secid in _candidate_secids(config["code"], config["category"]):
-            params = {**params_template, "secid": secid}
-
-            for attempt in range(1, len(retry_delays) + 2):
+            # 第 1 步：调用 AkShare 一次性获取所有指数数据
+            df = ak.stock_zh_index_spot_em()
+            
+            if df is None or df.empty:
+                raise ValueError("AkShare 返回空数据集")
+            
+            # 第 2 步：构建代码到行数据的映射（O(1) 查询）
+            code_to_row = {}
+            for _, row in df.iterrows():
+                code = str(row.get("代码") or "").strip()
+                if code:
+                    code_to_row[code] = row
+            
+            # 第 3 步：过滤出需要的指数并构建结果
+            result = []
+            target_configs = (configs or MARKET_INDEX_CONFIGS)
+            
+            for config in target_configs:
+                code = str(config.get("code") or "").strip()
+                if not code:
+                    continue
+                
+                row = code_to_row.get(code)
+                if row is None:
+                    LOGGER.warning(
+                        f"指数在 AkShare 中未找到: {config.get('name')}({code})"
+                    )
+                    continue
+                
                 try:
-                    data_json = _request_json(url, params)
-                    data = data_json.get("data") or {}
-                    current = _to_float(data.get("f43"))
-                    name = str(data.get("f58") or "").strip()
-                    returned_code = str(data.get("f57") or "").strip()
-                    if current is None or returned_code != config["code"]:
-                        raise ValueError("返回代码或价格无效")
-                    return {
-                        "code": config["code"],
-                        "name": name or config["name"],
+                    # 提取并转换数据
+                    current = float(row.get("最新价"))
+                    pct = float(row.get("涨跌幅"))
+                    change = float(row.get("涨跌额"))
+                    
+                    result.append({
+                        "code": code,
+                        "name": config.get("name"),
                         "current": current,
-                        "change": _to_float(data.get("f169")),
-                        "pct": _to_float(data.get("f170")),
+                        "change": change,
+                        "pct": pct,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }
-                except Exception as exc:
-                    last_err = exc
-                    if attempt <= len(retry_delays):
-                        time_module.sleep(retry_delays[attempt - 1])
-
-            try:
-                data_json = _request_json(url, params, bypass_env_proxy=True)
-                data = data_json.get("data") or {}
-                current = _to_float(data.get("f43"))
-                name = str(data.get("f58") or "").strip()
-                returned_code = str(data.get("f57") or "").strip()
-                if current is None or returned_code != config["code"]:
-                    raise ValueError("返回代码或价格无效")
-                return {
-                    "code": config["code"],
-                    "name": name or config["name"],
-                    "current": current,
-                    "change": _to_float(data.get("f169")),
-                    "pct": _to_float(data.get("f170")),
-                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                }
-            except Exception as exc:
-                last_err = exc
-
-        raise ValueError(f"{config['name']}({config['code']}) 抓取失败: {last_err}")
-
-    target_configs = [
-        {
-            "code": str(item.get("code") or "").strip(),
-            "name": str(item.get("name") or "").strip(),
-            "category": str(item.get("category") or "").strip(),
-        }
-        for item in (configs or MARKET_INDEX_CONFIGS)
-        if str(item.get("code") or "").strip() and str(item.get("name") or "").strip()
-    ]
-    collected: dict[str, dict] = {}
-    errors: list[str] = []
-
-    for config in target_configs:
-        try:
-            collected[config["code"]] = _fetch_index_quote(config)
+                    })
+                    
+                except (ValueError, TypeError) as exc:
+                    LOGGER.warning(
+                        f"无法解析指数数据: {config.get('name')}({code}): {exc}"
+                    )
+                    continue
+            
+            if not result:
+                raise ValueError("未能获取任何指数数据")
+            
+            return result
+            
         except Exception as exc:
-            errors.append(str(exc))
-            LOGGER.warning("大盘指数抓取失败: %s", exc)
-
-    if not collected:
-        raise ValueError("指数行情获取失败: " + " | ".join(errors[:3]))
-
-    res: list[dict] = []
-    for config in target_configs:
-        row = collected.get(config["code"])
-        if row:
-            res.append(row)
-
-    return res
+            last_exc = exc
+            if attempt < len(retry_delays):
+                delay = retry_delays[attempt]
+                LOGGER.warning(
+                    f"AkShare 市场指数获取失败 (第 {attempt + 1} 次尝试): {exc}, "
+                    f"将在 {delay} 秒后重试..."
+                )
+                time_module.sleep(delay)
+            else:
+                LOGGER.error(f"AkShare 市场指数获取失败，所有 {len(retry_delays) + 1} 次重试已耗尽")
+    
+    raise ValueError(f"AkShare 市场指数获取失败: {last_exc}") from last_exc
 
 
 def fetch_fund(code: str):
