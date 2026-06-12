@@ -125,6 +125,28 @@ PROXY_ENV_KEYS = [
 
 
 @contextmanager
+def _temporary_stdio_for_akshare():
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    fallback_stdout = None
+    fallback_stderr = None
+
+    try:
+        if original_stdout is None:
+            fallback_stdout = io.StringIO()
+            sys.stdout = fallback_stdout
+        if original_stderr is None:
+            fallback_stderr = io.StringIO()
+            sys.stderr = fallback_stderr
+        yield
+    finally:
+        if fallback_stdout is not None:
+            sys.stdout = original_stdout
+        if fallback_stderr is not None:
+            sys.stderr = original_stderr
+
+
+@contextmanager
 def _without_proxy_env():
     backup: dict[str, str] = {}
     removed: list[str] = []
@@ -215,7 +237,8 @@ def fetch_cn_indices(configs: list[dict] | None = None):
     for attempt in range(len(retry_delays) + 1):
         try:
             # 第 1 步：调用 AkShare 一次性获取所有指数数据
-            df = ak.stock_zh_index_spot_em()
+            with _temporary_stdio_for_akshare():
+                df = ak.stock_zh_index_spot_em()
             
             if df is None or df.empty:
                 raise ValueError("AkShare 返回空数据集")
@@ -3671,4 +3694,3 @@ def main(page: ft.Page):
 
 if __name__ == "__main__":
     ft.run(main, view=ft.AppView.FLET_APP)
-

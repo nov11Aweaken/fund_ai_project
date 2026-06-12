@@ -1,9 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "EXIT_CODE=0"
 set "PY_CMD=python"
+set "EXE_PREFIX=基你太美"
 if exist ".\.venv\Scripts\python.exe" set "PY_CMD=.\.venv\Scripts\python.exe"
 
 echo ==========================================
@@ -25,6 +27,7 @@ REM Supports both English and localized date formats
 for /f "tokens=1-4 delims=/- " %%a in ('wmic os get LocalDateTime ^| find "20"') do (
   set "DATE_STR=%%a"
 )
+if not "!DATE_STR!"=="" set "DATE_STR=!DATE_STR:~0,8!"
 
 if "!DATE_STR!"=="" (
   REM Fallback to alternative method
@@ -38,10 +41,10 @@ if "!DATE_STR!"=="" (
 
 echo.
 echo ==========================================
-echo FILE NAME FORMAT: 基你太美_!DATE_STR!_[YOUR_INPUT].exe
+echo FILE NAME FORMAT: !EXE_PREFIX!_!DATE_STR!_[YOUR_INPUT].exe
 echo ==========================================
 echo.
-set /p USER_INPUT=Enter the suffix for EXE name (no .exe needed): 
+set /p USER_INPUT=Enter the suffix for EXE name (no .exe needed):
 
 if "!USER_INPUT!"=="" (
   echo [ERROR] The suffix cannot be empty.
@@ -49,7 +52,18 @@ if "!USER_INPUT!"=="" (
   goto :end
 )
 
-set "EXE_NAME=基你太美_!DATE_STR!_!USER_INPUT!"
+set "RAW_USER_INPUT=!USER_INPUT!"
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $value = $env:RAW_USER_INPUT; $invalid = [System.IO.Path]::GetInvalidFileNameChars(); $pattern = '[' + [Regex]::Escape((-join $invalid)) + ']'; $safe = [Regex]::Replace($value, $pattern, '_').Trim(); Write-Output $safe"`) do (
+  set "SAFE_USER_INPUT=%%i"
+)
+
+if "!SAFE_USER_INPUT!"=="" (
+  echo [ERROR] The suffix cannot be empty after removing invalid file name characters.
+  set "EXIT_CODE=1"
+  goto :end
+)
+
+set "EXE_NAME=!EXE_PREFIX!_!DATE_STR!_!SAFE_USER_INPUT!"
 
 where python >nul 2>nul
 if errorlevel 1 (
