@@ -16,8 +16,6 @@ import flet as ft
 import akshare as ak
 import pandas as pd
 import requests
-import pyecharts.options as opts
-from pyecharts.charts import Line
 
 import matplotlib
 matplotlib.use("Agg")
@@ -72,8 +70,8 @@ MARKET_PAGE_SIZE = 50
 MARKET_MIN_REFRESH_SECONDS = 120
 
 
-HEADERS = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
-EM_HEADERS = {"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"}
+
+
 REFRESH_MS = 300000  # 5分钟自动刷新
 DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
 DETAIL_NAV_HISTORY_WINDOWS = [7, 15]
@@ -230,48 +228,48 @@ def _save_font_pref(font_family: str):
 
 def fetch_cn_indices(configs: list[dict] | None = None):
     """使用 AkShare 获取中国市场指数实时行情数据，支持重试"""
-    
+
     retry_delays = [1, 2, 3]
     last_exc = None
-    
+
     for attempt in range(len(retry_delays) + 1):
         try:
             # 第 1 步：调用 AkShare 一次性获取所有指数数据
             with _temporary_stdio_for_akshare():
                 df = ak.stock_zh_index_spot_em()
-            
+
             if df is None or df.empty:
                 raise ValueError("AkShare 返回空数据集")
-            
+
             # 第 2 步：构建代码到行数据的映射（O(1) 查询）
             code_to_row = {}
             for _, row in df.iterrows():
                 code = str(row.get("代码") or "").strip()
                 if code:
                     code_to_row[code] = row
-            
+
             # 第 3 步：过滤出需要的指数并构建结果
             result = []
             target_configs = (configs or MARKET_INDEX_CONFIGS)
-            
+
             for config in target_configs:
                 code = str(config.get("code") or "").strip()
                 if not code:
                     continue
-                
+
                 row = code_to_row.get(code)
                 if row is None:
                     LOGGER.warning(
                         f"指数在 AkShare 中未找到: {config.get('name')}({code})"
                     )
                     continue
-                
+
                 try:
                     # 提取并转换数据
                     current = float(row.get("最新价"))
                     pct = float(row.get("涨跌幅"))
                     change = float(row.get("涨跌额"))
-                    
+
                     result.append({
                         "code": code,
                         "name": config.get("name"),
@@ -280,18 +278,18 @@ def fetch_cn_indices(configs: list[dict] | None = None):
                         "pct": pct,
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     })
-                    
+
                 except (ValueError, TypeError) as exc:
                     LOGGER.warning(
                         f"无法解析指数数据: {config.get('name')}({code}): {exc}"
                     )
                     continue
-            
+
             if not result:
                 raise ValueError("未能获取任何指数数据")
-            
+
             return result
-            
+
         except Exception as exc:
             last_exc = exc
             if attempt < len(retry_delays):
@@ -303,34 +301,62 @@ def fetch_cn_indices(configs: list[dict] | None = None):
                 time_module.sleep(delay)
             else:
                 LOGGER.error(f"AkShare 市场指数获取失败，所有 {len(retry_delays) + 1} 次重试已耗尽")
-    
+
     raise ValueError(f"AkShare 市场指数获取失败: {last_exc}") from last_exc
 
 
-def fetch_fund(code: str):
-    url = f"http://fundgz.1234567.com.cn/js/{code}.js"
-    resp = requests.get(url, headers=HEADERS, timeout=5)
-    text = resp.text.strip()
-    if resp.status_code != 200 or "jsonpgz" not in text:
-        raise ValueError("基金接口返回异常")
+_fund_estimate_cache = {}
+_FUND_ESTIMATE_CACHE_TTL = 30
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("基金数据解析失败")
+def _fetch_all_fund_estimates() -> dict[str, dict]:
+    now = time_module.time()
+    if _fund_estimate_cache.get("_ts") and now - _fund_estimate_cache["_ts"] < _FUND_ESTIMATE_CACHE_TTL:
+        return _fund_estimate_cache["_data"]
 
-    data = json.loads(text[start : end + 1])
-    name = data.get("name") or data.get("fS_name") or code
-    est_nav = float(data["gsz"]) if data.get("gsz") else None
-    prev_nav = float(data["dwjz"]) if data.get("dwjz") else None
-    pct = float(data["gszzl"]) if data.get("gszzl") else None
-    ts = data.get("gztime") or ""
+    url = "https://api.fund.eastmoney.com/FundGuZhi/GetFundGZList"
+    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/"}
+    params = {"type": "1", "sort": "3", "orderType": "desc", "canbuy": "0", "pageIndex": "1", "pageSize": "50000"}
+    resp = requests.get(url, params=params, headers=hdrs, timeout=10)
+    data = resp.json()
+    lst = data.get("Data", {}).get("list", [])
+    lookup = {}
+    for item in lst:
+        code = item.get("bzdm")
+        if code:
+            lookup[code] = item
+    _fund_estimate_cache["_ts"] = now
+    _fund_estimate_cache["_data"] = lookup
+    return lookup
+
+
+def _parse_fund_estimate(item: dict, code: str) -> dict:
+    name = item.get("jjjc", "") or code
+    gsz_raw = item.get("gsz", "---")
+    gszzl_raw = item.get("gszzl", "---")
+    dwjz_raw = item.get("dwjz", "---")
+    gxrq = item.get("gxrq", "")
+
+    est_nav = float(gsz_raw) if gsz_raw not in ("---", "", None) else None
+    prev_nav = float(dwjz_raw) if dwjz_raw not in ("---", "", None) else None
+    pct_raw = gszzl_raw.replace("%", "") if gszzl_raw not in ("---", "", None) else None
+    pct = float(pct_raw) if pct_raw is not None else None
+    ts = gxrq or ""
 
     if est_nav is None:
         raise ValueError("基金估算净值缺失")
-
     change = est_nav - prev_nav if prev_nav else 0.0
     pct = pct if pct is not None else (change / prev_nav * 100 if prev_nav else 0.0)
+
+    return {"name": name, "est_nav": est_nav, "prev_nav": prev_nav, "pct": pct, "change": change, "ts": ts}
+
+
+def fetch_fund(code: str):
+    lookup = _fetch_all_fund_estimates()
+    item = lookup.get(code)
+    if item is None:
+        raise ValueError("基金接口返回异常")
+
+    parsed = _parse_fund_estimate(item, code)
 
     stats = {}
     try:
@@ -339,40 +365,30 @@ def fetch_fund(code: str):
         LOGGER.exception("基金历史获取失败: %s", code)
 
     return {
-        "name": name,
-        "current": est_nav,
-        "change": change,
-        "pct": pct,
-        "prev_close": prev_nav or 0.0,
-        "ts": ts,
+        "name": parsed["name"],
+        "current": parsed["est_nav"],
+        "change": parsed["change"],
+        "pct": parsed["pct"],
+        "prev_close": parsed["prev_nav"] or 0.0,
+        "ts": parsed["ts"],
         **stats,
     }
 
 
 def fetch_fund_estimate(code: str):
-    """Fetch fund estimate (估值) from 1234567 endpoint.
-
-    Returns: {name, pct, ts, prev_nav, current_nav}
-    """
-
-    url = f"http://fundgz.1234567.com.cn/js/{code}.js"
-    resp = requests.get(url, headers=HEADERS, timeout=5)
-    text = resp.text.strip()
-    if resp.status_code != 200 or "jsonpgz" not in text:
+    lookup = _fetch_all_fund_estimates()
+    item = lookup.get(code)
+    if item is None:
         raise ValueError("基金接口返回异常")
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("基金数据解析失败")
-
-    data = json.loads(text[start : end + 1])
-    name = data.get("name") or data.get("fS_name") or code
-    current_nav = float(data["gsz"]) if data.get("gsz") else None
-    pct = float(data["gszzl"]) if data.get("gszzl") else None
-    prev_nav = float(data["dwjz"]) if data.get("dwjz") else None
-    ts = data.get("gztime") or ""
-    return {"name": name, "pct": pct, "ts": ts, "prev_nav": prev_nav, "current_nav": current_nav}
+    parsed = _parse_fund_estimate(item, code)
+    return {
+        "name": parsed["name"],
+        "pct": parsed["pct"],
+        "ts": parsed["ts"],
+        "prev_nav": parsed["prev_nav"],
+        "current_nav": parsed["est_nav"],
+    }
 
 
 def fund_list_stats_from_history(code: str):
@@ -570,120 +586,6 @@ def fund_history_stats(code: str):
     }
 
 
-def build_dynamic_chart_data(code: str, name: str = "") -> dict:
-    """构造用于页面内动态图的结构化数据契约。"""
-    try:
-        df = fetch_fund_history_data(code)
-        df = df.copy()
-        df["单位净值"] = df["单位净值"].astype(float)
-    except ValueError as exc:
-        if "历史数据为空" in str(exc):
-            raise ValueError("动态K线图历史数据为空") from exc
-        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
-    except Exception as exc:
-        raise ValueError(f"动态K线图数据准备失败: {exc}") from exc
-
-    dates = df["净值日期"].dt.strftime("%Y-%m-%d").tolist() if not df.empty else []
-    nav_values = df["单位净值"].tolist() if not df.empty else []
-    if not dates or not nav_values:
-        raise ValueError("动态K线图历史数据为空")
-
-    ma_candidates = [5, 10, 20, 30, 60, 120, 250]
-    default_ma_days = [5, 10, 20, 250]
-    title_name = (name or "").strip() or code
-    code_suffix = f"({code})"
-    if title_name.endswith(code_suffix):
-        title_name = title_name[:-len(code_suffix)].strip() or code
-
-    ma_series: dict[str, list[float | None]] = {}
-    for days in ma_candidates:
-        ma_values = df["单位净值"].rolling(window=days).mean().tolist()
-        series: list[float | None] = []
-        for value in ma_values:
-            if pd.isna(value):
-                series.append(None)
-            else:
-                series.append(float(value))
-        ma_series[str(days)] = series
-
-    title = f"{code} 净值走势" if title_name == code else f"{title_name} ({code}) 净值走势"
-
-    return {
-        "title": title,
-        "dates": dates,
-        "nav_values": [float(value) for value in nav_values],
-        "ma_series": ma_series,
-        "ma_candidates": ma_candidates,
-        "default_ma_days": default_ma_days,
-    }
-
-
-def build_dynamic_chart_series(chart_data: dict, selected_days: list[int]) -> list[dict]:
-    ma_candidates = {int(day) for day in chart_data["ma_candidates"]}
-    normalized_days: list[int] = []
-    for day in selected_days:
-        try:
-            day_value = int(day)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"MA 周期无效: {day}") from exc
-        if day_value not in ma_candidates:
-            raise ValueError(f"不支持的 MA 周期: {day_value}")
-        if day_value not in normalized_days:
-            normalized_days.append(day_value)
-
-    series = [
-        {
-            "name": "单位净值",
-            "type": "line",
-            "data": chart_data["nav_values"],
-            "showSymbol": False,
-            "smooth": False,
-            "lineStyle": {"width": 2.5, "color": ACCENT},
-        }
-    ]
-    for day in normalized_days:
-        ma_values = chart_data["ma_series"].get(str(day))
-        if ma_values is None:
-            raise ValueError(f"缺少 MA{day} 数据")
-        series.append(
-            {
-                "name": f"MA{day}",
-                "type": "line",
-                "data": ma_values,
-                "showSymbol": False,
-                "smooth": True,
-                "lineStyle": {"width": 1.2},
-            }
-        )
-    return series
-
-
-def build_dynamic_chart_option(chart_data: dict, selected_days: list[int]) -> dict:
-    series = build_dynamic_chart_series(chart_data, selected_days)
-    return {
-        "animation": False,
-        "legend": {
-            "top": "2%",
-            "data": [item["name"] for item in series],
-        },
-        "tooltip": {"trigger": "axis"},
-        "toolbox": {"feature": {"saveAsImage": {}}},
-        "dataZoom": [
-            {"type": "inside", "start": 75, "end": 100},
-            {"type": "slider", "start": 75, "end": 100, "bottom": "2%"},
-        ],
-        "grid": {"left": 56, "right": 28, "top": 70, "bottom": 78},
-        "xAxis": {
-            "type": "category",
-            "boundaryGap": False,
-            "data": chart_data["dates"],
-            "axisLabel": {"rotate": 35},
-        },
-        "yAxis": {"type": "value", "scale": True},
-        "series": series,
-    }
-
-
 def render_fund_nav_png_bytes(code: str) -> bytes:
     df = fetch_fund_history_data(code)
     dates = df["净值日期"]
@@ -754,15 +656,6 @@ def _ensure_dynamic_chart_asset(output_dir: Path) -> Path:
     except OSError as exc:
         raise ValueError(f"ECharts 资源复制失败: {exc}") from exc
     return asset_path
-
-
-def build_dynamic_chart_options(code: str, name: str = "") -> dict:
-    chart_data = build_dynamic_chart_data(code, name)
-    option = build_dynamic_chart_option(chart_data, chart_data["default_ma_days"])
-    return {
-        "title": chart_data["title"],
-        "option_json": json.dumps(option, ensure_ascii=False),
-    }
 
 
 def build_dynamic_chart_data(code: str, name: str = "") -> dict:
@@ -1694,6 +1587,7 @@ class FletApp:
 
     def on_close(self, e):
         self.running = False
+        os._exit(0)
 
     def _safe_run_task(self, handler, *args):
         if not getattr(self, "running", False):
@@ -1932,11 +1826,11 @@ class FletApp:
             price = item.get("price")
             chg = item.get("chg")
             pct = item.get("pct")
-            
+
             price_text = f"{float(price):.2f}" if price is not None else "--"
             chg_text = f"{float(chg):+.2f}" if chg is not None else "--"
             pct_text = f"{float(pct):+.2f}%" if pct is not None else "--"
-            
+
             checkbox = ft.Checkbox(
                 value=False,
                 label=f"{name} ({code})  {price_text} / {chg_text} / {pct_text}",
@@ -1991,16 +1885,16 @@ class FletApp:
             price = item.get("price")
             chg = item.get("chg")
             pct = item.get("pct")
-            
+
             price_text = f"{float(price):.2f}" if price is not None else "--"
             chg_text = f"{float(chg):+.2f}" if chg is not None else "--"
             pct_value = float(pct) if pct is not None else None
-            
+
             if pct_value is not None:
                 pct_text = FletApp._format_markdown_pct_value(self, pct_value)
             else:
                 pct_text = "--"
-            
+
             lines.append(f"| {name} | {code} | {price_text} | {chg_text} | {pct_text} |")
         return "\n".join(lines)
 
@@ -3593,6 +3487,7 @@ class FletApp:
 
         self._refresh_detail_holding_action()
         self.txt_header_title.value = tgt.get("label", "")
+
         self.txt_header_time.value = header_time
         self.txt_price.value = price_text
         self.txt_change.value = change_text
