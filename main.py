@@ -72,6 +72,7 @@ MARKET_MIN_REFRESH_SECONDS = 120
 
 
 
+ESTIMATE_MODE_KEY = "estimate_mode"
 REFRESH_MS = 300000  # 5分钟自动刷新
 DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
 DETAIL_NAV_HISTORY_WINDOWS = [7, 15]
@@ -226,6 +227,26 @@ def _save_font_pref(font_family: str):
         json.dump(prefs, f, ensure_ascii=False, indent=2)
 
 
+def _load_estimate_mode_pref() -> bool:
+    try:
+        with _pref_path().open("r", encoding="utf-8") as f:
+            return bool(json.load(f).get(ESTIMATE_MODE_KEY, False))
+    except Exception:
+        return False
+
+
+def _save_estimate_mode_pref(mode: bool):
+    prefs = {}
+    try:
+        with _pref_path().open("r", encoding="utf-8") as f:
+            prefs = json.load(f)
+    except Exception:
+        pass
+    prefs[ESTIMATE_MODE_KEY] = mode
+    with _pref_path().open("w", encoding="utf-8") as f:
+        json.dump(prefs, f, ensure_ascii=False, indent=2)
+
+
 def fetch_cn_indices(configs: list[dict] | None = None):
     """使用 AkShare 获取中国市场指数实时行情数据，支持重试"""
 
@@ -307,8 +328,43 @@ def fetch_cn_indices(configs: list[dict] | None = None):
 
 _fund_estimate_cache = {}
 _FUND_ESTIMATE_CACHE_TTL = 30
+_USE_PAGINATION_MODE = False
 
-def _fetch_all_fund_estimates() -> dict[str, dict]:
+
+def _fetch_all_fund_estimates_paginated() -> dict[str, dict]:
+    now = time_module.time()
+    if _fund_estimate_cache.get("_ts") and now - _fund_estimate_cache["_ts"] < _FUND_ESTIMATE_CACHE_TTL:
+        return _fund_estimate_cache["_data"]
+
+    url = "https://api.fund.eastmoney.com/FundGuZhi/GetFundGZList"
+    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/"}
+    page_index = 1
+    page_size = 20000
+    lookup = {}
+
+    while True:
+        params = {
+            "type": "1", "sort": "3", "orderType": "desc", "canbuy": "0",
+            "pageIndex": str(page_index), "pageSize": str(page_size),
+            "_": int(time_module.time() * 1000),
+        }
+        resp = requests.get(url, params=params, headers=hdrs, timeout=10)
+        data = resp.json()
+        lst = data.get("Data", {}).get("list", [])
+        for item in lst:
+            code = item.get("bzdm")
+            if code:
+                lookup[code] = item
+        if len(lst) < page_size:
+            break
+        page_index += 1
+
+    _fund_estimate_cache["_ts"] = now
+    _fund_estimate_cache["_data"] = lookup
+    return lookup
+
+
+def _fetch_all_fund_estimates_direct() -> dict[str, dict]:
     now = time_module.time()
     if _fund_estimate_cache.get("_ts") and now - _fund_estimate_cache["_ts"] < _FUND_ESTIMATE_CACHE_TTL:
         return _fund_estimate_cache["_data"]
@@ -327,6 +383,22 @@ def _fetch_all_fund_estimates() -> dict[str, dict]:
     _fund_estimate_cache["_ts"] = now
     _fund_estimate_cache["_data"] = lookup
     return lookup
+
+
+def _fetch_all_fund_estimates() -> dict[str, dict]:
+    if _USE_PAGINATION_MODE:
+        return _fetch_all_fund_estimates_paginated()
+    return _fetch_all_fund_estimates_direct()
+
+
+def _set_estimate_mode(mode: bool):
+    global _USE_PAGINATION_MODE
+    _USE_PAGINATION_MODE = mode
+    _save_estimate_mode_pref(mode)
+
+
+def _clear_estimate_cache():
+    _fund_estimate_cache.clear()
 
 
 def _parse_fund_estimate(item: dict, code: str) -> dict:
@@ -414,7 +486,16 @@ def fund_list_stats_from_history(code: str):
     }
 
 
+_fund_history_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_FUND_HISTORY_CACHE_TTL = 300
+
+
 def fetch_fund_history_data(code: str):
+    now = time_module.time()
+    cached = _fund_history_cache.get(code)
+    if cached is not None and now - cached[0] < _FUND_HISTORY_CACHE_TTL:
+        return cached[1]
+
     try:
         df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
     except AttributeError as exc:
@@ -449,6 +530,7 @@ def fetch_fund_history_data(code: str):
     except Exception as exc:
         raise ValueError(f"基金历史数据解析失败: {exc}")
 
+    _fund_history_cache[code] = (now, df.copy())
     return df
 
 
@@ -1013,6 +1095,22 @@ class FletApp:
             ),
         )
 
+        initial_mode = _load_estimate_mode_pref()
+        _set_estimate_mode(initial_mode)
+        self.btn_estimate_mode = ft.Button(
+            "翻页" if initial_mode else "直接",
+            icon=ft.Icons.SWAP_HORIZ,
+            on_click=self._toggle_estimate_mode,
+            icon_color=ACCENT,
+            tooltip="当前：翻页模式（AkShare 风格，pageSize=20000 分页拉取）" if initial_mode else "当前：URL 直连模式（pageSize=50000 单次请求）",
+            style=ft.ButtonStyle(
+                padding=ft.Padding(10, 10, 10, 10),
+                shape=ft.RoundedRectangleBorder(radius=12),
+                bgcolor={ft.ControlState.DEFAULT: SURFACE},
+                overlay_color={ft.ControlState.HOVERED: "#162196F3"},
+            ),
+        )
+
         self.detail_holding_tiles = [
             self._create_metric_tile("持仓份额"),
             self._create_metric_tile("持仓成本"),
@@ -1203,7 +1301,7 @@ class FletApp:
         top_row = ft.Row(
             [
                 ft.Container(content=self.dd_target, expand=True),
-                ft.Row([self.btn_refresh, self.btn_detail_holding_action], spacing=8),
+                ft.Row([self.btn_estimate_mode, self.btn_refresh, self.btn_detail_holding_action], spacing=4),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1742,6 +1840,19 @@ class FletApp:
             _save_font_pref(new_font)
         except Exception:
             LOGGER.exception("保存字体偏好失败")
+
+    def _toggle_estimate_mode(self, e):
+        new_mode = not _USE_PAGINATION_MODE
+        _set_estimate_mode(new_mode)
+        _fund_estimate_cache.clear()
+        self.btn_estimate_mode.content = "翻页" if new_mode else "直接"
+        self.btn_estimate_mode.tooltip = (
+            "当前：翻页模式（AkShare 风格，pageSize=20000 分页拉取）"
+            if new_mode else "当前：URL 直连模式（pageSize=50000 单次请求）"
+        )
+        self.page.update()
+        self._show_message(f"已切换至{'翻页' if new_mode else '直接'}模式")
+        self.manual_refresh()
 
     def open_fund_detail(self, code: str):
         # Switch to detail tab and select corresponding fund

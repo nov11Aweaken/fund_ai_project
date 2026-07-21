@@ -1,3 +1,4 @@
 {
-  "ui_font": "NotoSansSC"
+  "ui_font": "NotoSansSC",
+  "estimate_mode": true
 }
