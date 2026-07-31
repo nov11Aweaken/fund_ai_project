@@ -2,18 +2,18 @@
 
 import certifi
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
-
 certifi_cacert_path = certifi.where()
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=collect_dynamic_libs('py_mini_racer'),
+    binaries=[],
     datas=[
         (certifi_cacert_path, 'certifi'),
         ('.\\assets\\echarts.min.js', 'assets'),
-    ] + collect_data_files('akshare') + collect_data_files('py_mini_racer'),
+        ('.\\assets\\icon.png', 'assets'),
+        ('.\\assets\\fonts', 'assets\\fonts'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -89,7 +89,7 @@ class PageRedesignHelperTests(unittest.TestCase):
             output_dir.mkdir(parents=True, exist_ok=True)
 
             with (
-                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(main, "_resource_dir", return_value=base_dir),
                 mock.patch.object(main.requests, "get", side_effect=AssertionError("不应发起网络请求")),
             ):
                 asset_path = main._ensure_dynamic_chart_asset(output_dir)
@@ -104,7 +104,7 @@ class PageRedesignHelperTests(unittest.TestCase):
             output_dir.mkdir(parents=True, exist_ok=True)
 
             with (
-                mock.patch.object(main, "_app_dir", return_value=base_dir),
+                mock.patch.object(main, "_resource_dir", return_value=base_dir),
                 mock.patch.object(main.requests, "get", side_effect=AssertionError("不应发起网络请求")),
             ):
                 with self.assertRaisesRegex(ValueError, "缺少本地 ECharts 资源"):
@@ -521,25 +521,16 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["daily_pct"], -5.0)
         self.assertAlmostEqual(rows[1]["daily_pct"], 10.0)
 
-    def test_fetch_fund_history_data_deduplicates_accumulated_nav_dates_before_merge(self):
+    def test_fetch_fund_history_data_normalizes_pingzhong_history_columns(self):
         unit_df = pd.DataFrame(
             {
                 "净值日期": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
                 "单位净值": [1.0, 1.1, 1.21],
-            }
-        )
-        accumulated_df = pd.DataFrame(
-            {
-                "净值日期": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-03", "2024-01-04"]),
-                "累计净值": [1.0, 1.12, 1.12, 1.25],
+                "累计净值": [1.0, 1.12, 1.25],
             }
         )
 
-        with mock.patch.object(
-            main.ak,
-            "fund_open_fund_info_em",
-            side_effect=[unit_df, accumulated_df],
-        ):
+        with mock.patch.object(main, "_fetch_fund_pingzhong_history", return_value=unit_df):
             history_df = main.fetch_fund_history_data("110022")
 
         rows = main.build_recent_nav_change_rows(history_df, 7)
@@ -547,6 +538,32 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertEqual(history_df["净值日期"].dt.strftime("%Y-%m-%d").tolist(), ["2024-01-02", "2024-01-03", "2024-01-04"])
         self.assertEqual([row["date"] for row in rows], ["2024-01-04", "2024-01-03"])
         self.assertTrue(all(row["daily_pct"] != 0.0 for row in rows))
+
+    def test_fetch_fund_pingzhong_history_parses_js_and_deduplicates_accumulated_dates(self):
+        js = (
+            "var fS_name = '测试基金';"
+            "var fS_code = '110022';"
+            "Data_netWorthTrend = ["
+            '{"x":1704153600000,"y":1.0,"equityReturn":0},'
+            '{"x":1704240000000,"y":1.1,"equityReturn":10},'
+            '{"x":1704326400000,"y":1.21,"equityReturn":10}'
+            "];"
+            "Data_ACWorthTrend = ["
+            "[1704153600000,1.0],"
+            "[1704240000000,1.12],"
+            "[1704240000000,1.12],"
+            "[1704326400000,1.25]"
+            "];"
+        )
+        resp = mock.Mock()
+        resp.text = js
+
+        with mock.patch.object(main.requests, "get", return_value=resp):
+            df = main._fetch_fund_pingzhong_history("110022")
+
+        self.assertEqual(len(df), 3)
+        self.assertEqual(df["净值日期"].dt.strftime("%Y-%m-%d").tolist(), ["2024-01-02", "2024-01-03", "2024-01-04"])
+        self.assertEqual(df["累计净值"].tolist(), [1.0, 1.12, 1.25])
 
     def test_build_recent_nav_change_rows_returns_empty_when_only_one_nav_point_available(self):
         df = pd.DataFrame(

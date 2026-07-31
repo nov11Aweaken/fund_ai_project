@@ -6,6 +6,7 @@ import sys
 import logging
 import tempfile
 import io
+import re
 import shutil
 import time as time_module
 from contextlib import contextmanager
@@ -13,7 +14,6 @@ from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 import flet as ft
-import akshare as ak
 import pandas as pd
 import requests
 
@@ -124,28 +124,6 @@ PROXY_ENV_KEYS = [
 
 
 @contextmanager
-def _temporary_stdio_for_akshare():
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    fallback_stdout = None
-    fallback_stderr = None
-
-    try:
-        if original_stdout is None:
-            fallback_stdout = io.StringIO()
-            sys.stdout = fallback_stdout
-        if original_stderr is None:
-            fallback_stderr = io.StringIO()
-            sys.stderr = fallback_stderr
-        yield
-    finally:
-        if fallback_stdout is not None:
-            sys.stdout = original_stdout
-        if fallback_stderr is not None:
-            sys.stderr = original_stderr
-
-
-@contextmanager
 def _without_proxy_env():
     backup: dict[str, str] = {}
     removed: list[str] = []
@@ -166,6 +144,14 @@ def _app_dir() -> Path:
     # In PyInstaller onefile/onedir, sys.executable points to the bundled exe.
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
+    return Path(__file__).parent
+
+
+def _resource_dir() -> Path:
+    # In PyInstaller onefile, bundled data files are extracted under sys._MEIPASS.
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base)
     return Path(__file__).parent
 
 
@@ -247,64 +233,90 @@ def _save_estimate_mode_pref(mode: bool):
         json.dump(prefs, f, ensure_ascii=False, indent=2)
 
 
+MARKET_QUOTE_HOSTS = [
+    "push2delay.eastmoney.com",
+    "push2.eastmoney.com",
+]
+
+MARKET_QUOTE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://quote.eastmoney.com/",
+}
+
+
+def _index_secid(code: str) -> str:
+    """根据指数代码推导东方财富 secid（代码优先）。"""
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    market = "0" if code[0] in "389" else "1"
+    return f"{market}.{code}"
+
+
+def _fetch_index_quote(secid: str) -> dict | None:
+    """通过东方财富单票接口获取指数行情，按 host 列表依次回退。"""
+    params = {
+        "secid": secid,
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+        "fltt": "2",
+        "invt": "2",
+        "fields": "f43,f169,f170",
+    }
+    for host in MARKET_QUOTE_HOSTS:
+        try:
+            resp = requests.get(
+                f"https://{host}/api/qt/stock/get",
+                params=params,
+                headers=MARKET_QUOTE_HEADERS,
+                timeout=10,
+            )
+            data = resp.json().get("data")
+            if not data or data.get("f43") is None:
+                continue
+            return {
+                "current": float(data["f43"]),
+                "change": float(data["f169"]) if data.get("f169") is not None else None,
+                "pct": float(data["f170"]) if data.get("f170") is not None else None,
+            }
+        except Exception:
+            continue
+    return None
+
+
 def fetch_cn_indices(configs: list[dict] | None = None):
-    """使用 AkShare 获取中国市场指数实时行情数据，支持重试"""
+    """使用东方财富指数行情接口获取中国市场指数实时行情数据，支持重试与 host 回退"""
 
     retry_delays = [1, 2, 3]
     last_exc = None
+    target_configs = configs if configs is not None else MARKET_INDEX_CONFIGS
 
     for attempt in range(len(retry_delays) + 1):
         try:
-            # 第 1 步：调用 AkShare 一次性获取所有指数数据
-            with _temporary_stdio_for_akshare():
-                df = ak.stock_zh_index_spot_em()
-
-            if df is None or df.empty:
-                raise ValueError("AkShare 返回空数据集")
-
-            # 第 2 步：构建代码到行数据的映射（O(1) 查询）
-            code_to_row = {}
-            for _, row in df.iterrows():
-                code = str(row.get("代码") or "").strip()
-                if code:
-                    code_to_row[code] = row
-
-            # 第 3 步：过滤出需要的指数并构建结果
             result = []
-            target_configs = (configs or MARKET_INDEX_CONFIGS)
-
             for config in target_configs:
                 code = str(config.get("code") or "").strip()
                 if not code:
                     continue
 
-                row = code_to_row.get(code)
-                if row is None:
+                secid = _index_secid(code)
+                quote = _fetch_index_quote(secid)
+                if quote is None:
                     LOGGER.warning(
-                        f"指数在 AkShare 中未找到: {config.get('name')}({code})"
+                        f"指数行情获取失败: {config.get('name')}({code})"
                     )
                     continue
 
-                try:
-                    # 提取并转换数据
-                    current = float(row.get("最新价"))
-                    pct = float(row.get("涨跌幅"))
-                    change = float(row.get("涨跌额"))
-
-                    result.append({
-                        "code": code,
-                        "name": config.get("name"),
-                        "current": current,
-                        "change": change,
-                        "pct": pct,
-                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    })
-
-                except (ValueError, TypeError) as exc:
-                    LOGGER.warning(
-                        f"无法解析指数数据: {config.get('name')}({code}): {exc}"
-                    )
-                    continue
+                result.append({
+                    "code": code,
+                    "name": config.get("name"),
+                    "current": quote["current"],
+                    "change": quote["change"],
+                    "pct": quote["pct"],
+                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
 
             if not result:
                 raise ValueError("未能获取任何指数数据")
@@ -316,14 +328,14 @@ def fetch_cn_indices(configs: list[dict] | None = None):
             if attempt < len(retry_delays):
                 delay = retry_delays[attempt]
                 LOGGER.warning(
-                    f"AkShare 市场指数获取失败 (第 {attempt + 1} 次尝试): {exc}, "
+                    f"市场指数获取失败 (第 {attempt + 1} 次尝试): {exc}, "
                     f"将在 {delay} 秒后重试..."
                 )
                 time_module.sleep(delay)
             else:
-                LOGGER.error(f"AkShare 市场指数获取失败，所有 {len(retry_delays) + 1} 次重试已耗尽")
+                LOGGER.error(f"市场指数获取失败，所有 {len(retry_delays) + 1} 次重试已耗尽")
 
-    raise ValueError(f"AkShare 市场指数获取失败: {last_exc}") from last_exc
+    raise ValueError(f"市场指数获取失败: {last_exc}") from last_exc
 
 
 _fund_estimate_cache = {}
@@ -350,7 +362,8 @@ def _fetch_all_fund_estimates_paginated() -> dict[str, dict]:
         }
         resp = requests.get(url, params=params, headers=hdrs, timeout=10)
         data = resp.json()
-        lst = data.get("Data", {}).get("list", [])
+        list_data = data.get("Data")
+        lst = list_data.get("list", []) if isinstance(list_data, dict) else []
         for item in lst:
             code = item.get("bzdm")
             if code:
@@ -374,7 +387,8 @@ def _fetch_all_fund_estimates_direct() -> dict[str, dict]:
     params = {"type": "1", "sort": "3", "orderType": "desc", "canbuy": "0", "pageIndex": "1", "pageSize": "50000"}
     resp = requests.get(url, params=params, headers=hdrs, timeout=10)
     data = resp.json()
-    lst = data.get("Data", {}).get("list", [])
+    list_data = data.get("Data")
+    lst = list_data.get("list", []) if isinstance(list_data, dict) else []
     lookup = {}
     for item in lst:
         code = item.get("bzdm")
@@ -422,13 +436,78 @@ def _parse_fund_estimate(item: dict, code: str) -> dict:
     return {"name": name, "est_nav": est_nav, "prev_nav": prev_nav, "pct": pct, "change": change, "ts": ts}
 
 
+_fund_meta_name_cache: dict[str, str] = {}
+_fund_quote_fallback_cache: dict[str, tuple[float, dict]] = {}
+_FUND_QUOTE_FALLBACK_TTL = 300
+
+
+def _fetch_fund_name(code: str) -> str:
+    """估算接口不可用时，通过东方财富移动端接口获取基金简称（带缓存）。"""
+    cached = _fund_meta_name_cache.get(code)
+    if cached is not None:
+        return cached
+
+    name = ""
+    try:
+        url = "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNDetailInformation"
+        params = {
+            "FCODE": code,
+            "deviceid": "Wap",
+            "plat": "Wap",
+            "product": "EFund",
+            "version": "6.2.8",
+        }
+        hdrs = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
+            "Referer": "https://fundmobapi.eastmoney.com/",
+        }
+        resp = requests.get(url, params=params, headers=hdrs, timeout=10)
+        data = resp.json().get("Datas") or {}
+        name = str(data.get("SHORTNAME") or "").strip()
+    except Exception as exc:
+        LOGGER.warning(f"基金名称获取失败: {code}: {exc}")
+
+    if name:
+        _fund_meta_name_cache[code] = name
+    return name
+
+
+def _nav_history_quote(code: str) -> dict:
+    """估算接口无数据时，用最新公布净值构造兜底行情。"""
+    now = time_module.time()
+    cached = _fund_quote_fallback_cache.get(code)
+    if cached is not None and now - cached[0] < _FUND_QUOTE_FALLBACK_TTL:
+        return cached[1]
+
+    df = fetch_fund_history_data(code)
+    series = df["单位净值"].astype(float)
+    latest = float(series.iloc[-1])
+    previous = float(series.iloc[-2]) if len(series) >= 2 else latest
+    change = latest - previous if previous else 0.0
+    pct = change / previous * 100 if previous else 0.0
+
+    quote = {
+        "name": _fetch_fund_name(code),
+        "est_nav": latest,
+        "prev_nav": previous,
+        "pct": pct,
+        "change": change,
+        "ts": df["净值日期"].iloc[-1].strftime("%Y-%m-%d"),
+    }
+    _fund_quote_fallback_cache[code] = (now, quote)
+    return quote
+
+
 def fetch_fund(code: str):
     lookup = _fetch_all_fund_estimates()
     item = lookup.get(code)
     if item is None:
-        raise ValueError("基金接口返回异常")
-
-    parsed = _parse_fund_estimate(item, code)
+        parsed = _nav_history_quote(code)
+    else:
+        try:
+            parsed = _parse_fund_estimate(item, code)
+        except ValueError:
+            parsed = _nav_history_quote(code)
 
     stats = {}
     try:
@@ -451,9 +530,13 @@ def fetch_fund_estimate(code: str):
     lookup = _fetch_all_fund_estimates()
     item = lookup.get(code)
     if item is None:
-        raise ValueError("基金接口返回异常")
+        parsed = _nav_history_quote(code)
+    else:
+        try:
+            parsed = _parse_fund_estimate(item, code)
+        except ValueError:
+            parsed = _nav_history_quote(code)
 
-    parsed = _parse_fund_estimate(item, code)
     return {
         "name": parsed["name"],
         "pct": parsed["pct"],
@@ -490,6 +573,65 @@ _fund_history_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _FUND_HISTORY_CACHE_TTL = 300
 
 
+def _fetch_fund_pingzhong_history(code: str) -> pd.DataFrame:
+    """抓取天天基金 pingzhongdata JS，用正则提取净值数据（避免执行 JS 或分页拉取）。
+
+    返回列：净值日期、单位净值、累计净值、日增长率。
+    """
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
+    hdrs = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://fund.eastmoney.com/",
+    }
+    resp = requests.get(url, headers=hdrs, timeout=20)
+    text = resp.text
+
+    unit_match = re.search(r"Data_netWorthTrend\s*=\s*(\[.*?\]);", text, re.S)
+    if unit_match is None:
+        raise ValueError("基金历史数据为空")
+
+    unit_rows = json.loads(unit_match.group(1))
+    unit_df = pd.DataFrame(unit_rows)
+    if unit_df.empty:
+        raise ValueError("基金历史数据为空")
+
+    unit_df["净值日期"] = (
+        pd.to_datetime(unit_df["x"], unit="ms", utc=True)
+        .dt.tz_convert("Asia/Shanghai")
+        .dt.tz_localize(None)
+    )
+    unit_df["单位净值"] = pd.to_numeric(unit_df["y"], errors="coerce")
+    unit_df["日增长率"] = pd.to_numeric(unit_df["equityReturn"], errors="coerce")
+    unit_df = unit_df[["净值日期", "单位净值", "日增长率"]].copy()
+
+    unit_df["累计净值"] = None
+    acc_match = re.search(r"Data_ACWorthTrend\s*=\s*(\[.*?\]);", text, re.S)
+    if acc_match is not None:
+        try:
+            acc_rows = json.loads(acc_match.group(1))
+            acc_df = pd.DataFrame(acc_rows, columns=["x", "累计净值"])
+            acc_df["净值日期"] = (
+                pd.to_datetime(acc_df["x"], unit="ms", utc=True)
+                .dt.tz_convert("Asia/Shanghai")
+                .dt.tz_localize(None)
+            )
+            acc_df["累计净值"] = pd.to_numeric(acc_df["累计净值"], errors="coerce")
+            acc_df = acc_df.dropna(subset=["净值日期"]).drop_duplicates(subset=["净值日期"], keep="last")
+            unit_df = unit_df.merge(acc_df, on="净值日期", how="left", suffixes=("", "_history"))
+            if "累计净值_history" in unit_df.columns:
+                unit_df["累计净值"] = unit_df["累计净值_history"]
+                unit_df.drop(columns=["累计净值_history"], inplace=True)
+        except Exception:
+            pass
+
+    unit_df.sort_values("净值日期", inplace=True)
+    unit_df = unit_df[["净值日期", "单位净值", "累计净值", "日增长率"]]
+    return unit_df
+
+
 def fetch_fund_history_data(code: str):
     now = time_module.time()
     cached = _fund_history_cache.get(code)
@@ -497,11 +639,11 @@ def fetch_fund_history_data(code: str):
         return cached[1]
 
     try:
-        df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
-    except AttributeError as exc:
-        raise ValueError("当前 akshare 版本不支持 fund_open_fund_info_em") from exc
+        df = _fetch_fund_pingzhong_history(code)
+    except ValueError:
+        raise
     except Exception as exc:
-        raise ValueError(f"akshare 历史数据获取失败: {exc}")
+        raise ValueError(f"基金历史数据获取失败: {exc}") from exc
 
     if df is None or df.empty:
         raise ValueError("基金历史数据为空")
@@ -510,22 +652,8 @@ def fetch_fund_history_data(code: str):
         df = df.dropna(subset=["单位净值"]).copy()
         df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
         df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
+        df["累计净值"] = pd.to_numeric(df["累计净值"], errors="coerce")
         df = df.dropna(subset=["净值日期", "单位净值"])
-        df["累计净值"] = None
-        try:
-            accumulated_df = ak.fund_open_fund_info_em(symbol=code, indicator="累计净值走势")
-            if accumulated_df is not None and not accumulated_df.empty and {"净值日期", "累计净值"}.issubset(accumulated_df.columns):
-                accumulated_df = accumulated_df[["净值日期", "累计净值"]].copy()
-                accumulated_df["净值日期"] = pd.to_datetime(accumulated_df["净值日期"], errors="coerce")
-                accumulated_df["累计净值"] = pd.to_numeric(accumulated_df["累计净值"], errors="coerce")
-                accumulated_df = accumulated_df.dropna(subset=["净值日期"])
-                accumulated_df = accumulated_df.drop_duplicates(subset=["净值日期"], keep="last")
-                df = df.merge(accumulated_df, on="净值日期", how="left", suffixes=("", "_history"))
-                if "累计净值_history" in df.columns:
-                    df["累计净值"] = df["累计净值_history"]
-                    df.drop(columns=["累计净值_history"], inplace=True)
-        except Exception:
-            pass
         df.sort_values("净值日期", inplace=True)
     except Exception as exc:
         raise ValueError(f"基金历史数据解析失败: {exc}")
@@ -596,7 +724,7 @@ def build_nav_history_card_data(history_windows: dict | None, selected_window: i
 
 
 def fund_history_stats(code: str):
-    """Fetch history from akshare and compute short-term changes and moving averages."""
+    """Fetch history and compute short-term changes and moving averages."""
 
     df = fetch_fund_history_data(code)
 
@@ -726,7 +854,7 @@ def _ensure_dynamic_chart_asset(output_dir: Path) -> Path:
     except OSError as exc:
         raise ValueError(f"ECharts 运行时资源不可访问: {exc}") from exc
 
-    bundled_asset = _app_dir() / "assets" / DYNAMIC_CHART_ASSET_NAME
+    bundled_asset = _resource_dir() / "assets" / DYNAMIC_CHART_ASSET_NAME
     try:
         if not bundled_asset.exists() or bundled_asset.stat().st_size <= 0:
             raise ValueError(f"缺少本地 ECharts 资源: {bundled_asset}")
@@ -3677,14 +3805,19 @@ def main(page: ft.Page):
     page.bgcolor = BG
 
     # Register bundled NotoSansSC fonts
+    fonts_dir = _resource_dir() / "assets" / "fonts"
     page.fonts = {
-        "NotoSansSC": "fonts/NotoSansSC-Regular.otf",
-        "NotoSansSC-Medium": "fonts/NotoSansSC-Medium.otf",
-        "NotoSansSC-Bold": "fonts/NotoSansSC-Bold.otf",
+        family: str(fonts_dir / file)
+        for family, file in {
+            "NotoSansSC": "NotoSansSC-Regular.otf",
+            "NotoSansSC-Medium": "NotoSansSC-Medium.otf",
+            "NotoSansSC-Bold": "NotoSansSC-Bold.otf",
+        }.items()
+        if (fonts_dir / file).exists()
     }
 
     try:
-        icon_path = (Path(__file__).parent / "assets" / "icon.png").resolve()
+        icon_path = _resource_dir() / "assets" / "icon.png"
         if icon_path.exists():
             page.window.icon = str(icon_path)
     except Exception:
