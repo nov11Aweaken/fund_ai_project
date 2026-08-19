@@ -72,7 +72,6 @@ MARKET_MIN_REFRESH_SECONDS = 120
 
 
 
-ESTIMATE_MODE_KEY = "estimate_mode"
 REFRESH_MS = 300000  # 5分钟自动刷新
 DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
 DETAIL_NAV_HISTORY_WINDOWS = [7, 15]
@@ -213,26 +212,6 @@ def _save_font_pref(font_family: str):
         json.dump(prefs, f, ensure_ascii=False, indent=2)
 
 
-def _load_estimate_mode_pref() -> bool:
-    try:
-        with _pref_path().open("r", encoding="utf-8") as f:
-            return bool(json.load(f).get(ESTIMATE_MODE_KEY, False))
-    except Exception:
-        return False
-
-
-def _save_estimate_mode_pref(mode: bool):
-    prefs = {}
-    try:
-        with _pref_path().open("r", encoding="utf-8") as f:
-            prefs = json.load(f)
-    except Exception:
-        pass
-    prefs[ESTIMATE_MODE_KEY] = mode
-    with _pref_path().open("w", encoding="utf-8") as f:
-        json.dump(prefs, f, ensure_ascii=False, indent=2)
-
-
 MARKET_QUOTE_HOSTS = [
     "push2delay.eastmoney.com",
     "push2.eastmoney.com",
@@ -338,102 +317,122 @@ def fetch_cn_indices(configs: list[dict] | None = None):
     raise ValueError(f"市场指数获取失败: {last_exc}") from last_exc
 
 
-_fund_estimate_cache = {}
+FUND_VALUATION_HOSTS = [
+    "fundcomapi.tiantianfunds.com",
+    "fundcomapi.eastmoney.com",
+]
+FUND_VALUATION_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://fund.eastmoney.com/",
+}
+
+_fund_estimate_cache: dict[str, tuple[float, dict[str, dict]]] = {}
 _FUND_ESTIMATE_CACHE_TTL = 30
-_USE_PAGINATION_MODE = False
 
 
-def _fetch_all_fund_estimates_paginated() -> dict[str, dict]:
+def _normalize_fund_codes(codes: list[str]) -> list[str]:
+    normalized_codes: list[str] = []
+    for code in codes or []:
+        normalized = normalize_fund_code(code)
+        if normalized and normalized not in normalized_codes:
+            normalized_codes.append(normalized)
+    return normalized_codes
+
+
+def _fetch_fund_valuation_last(codes: list[str]) -> dict[str, dict]:
+    """通过天天基金新版批量估值接口获取指定基金的盘中估值。"""
+    normalized_codes = _normalize_fund_codes(codes)
+    if not normalized_codes:
+        return {}
+
+    cache_key = ",".join(sorted(normalized_codes))
     now = time_module.time()
-    if _fund_estimate_cache.get("_ts") and now - _fund_estimate_cache["_ts"] < _FUND_ESTIMATE_CACHE_TTL:
-        return _fund_estimate_cache["_data"]
+    cached = _fund_estimate_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _FUND_ESTIMATE_CACHE_TTL:
+        return cached[1]
 
-    url = "https://api.fund.eastmoney.com/FundGuZhi/GetFundGZList"
-    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/"}
-    page_index = 1
-    page_size = 20000
-    lookup = {}
+    params = {
+        "FCODES": ",".join(normalized_codes),
+        "FIELDS": "FCODE,SHORTNAME,GSZZL,GZTIME,GSZ,NAV,PDATE",
+    }
+    errors: list[str] = []
+    for host in FUND_VALUATION_HOSTS:
+        try:
+            resp = requests.get(
+                f"https://{host}/mm/newCore/FundValuationLast",
+                params=params,
+                headers=FUND_VALUATION_HEADERS,
+                timeout=10,
+            )
+            data = resp.json()
+            if not data.get("success"):
+                raise ValueError(data.get("firstError") or data.get("errorCode") or "接口返回失败")
 
-    while True:
-        params = {
-            "type": "1", "sort": "3", "orderType": "desc", "canbuy": "0",
-            "pageIndex": str(page_index), "pageSize": str(page_size),
-            "_": int(time_module.time() * 1000),
+            rows = data.get("data")
+            if not isinstance(rows, list):
+                raise ValueError("接口未返回基金估值列表")
+
+            lookup: dict[str, dict] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                code = normalize_fund_code(item.get("FCODE"))
+                if code:
+                    lookup[code] = item
+            _fund_estimate_cache[cache_key] = (now, lookup)
+            return lookup
+        except Exception as exc:
+            errors.append(f"{host}: {exc}")
+
+    raise ValueError(f"基金估值接口不可用: {' | '.join(errors)}")
+
+
+def _parse_optional_float(raw_value) -> float | None:
+    if raw_value in ("---", "", None):
+        return None
+    try:
+        return float(str(raw_value).replace("%", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_fund_valuation_last(item: dict, code: str) -> dict:
+    name = str(item.get("SHORTNAME") or code).strip() or code
+    estimated_nav = _parse_optional_float(item.get("GSZ"))
+    estimated_pct = _parse_optional_float(item.get("GSZZL"))
+    estimate_time = str(item.get("GZTIME") or "").strip()
+    published_nav = _parse_optional_float(item.get("NAV"))
+    published_date = str(item.get("PDATE") or "").strip()
+
+    if estimated_nav is not None and estimate_time:
+        change = estimated_nav - published_nav if published_nav is not None else 0.0
+        pct = estimated_pct
+        if pct is None and published_nav not in (None, 0):
+            pct = change / published_nav * 100
+        return {
+            "name": name,
+            "est_nav": estimated_nav,
+            "prev_nav": published_nav,
+            "pct": pct,
+            "change": change,
+            "ts": estimate_time,
+            "quote_status": "estimate",
+            "quote_label": "盘中估值",
         }
-        resp = requests.get(url, params=params, headers=hdrs, timeout=10)
-        data = resp.json()
-        list_data = data.get("Data")
-        lst = list_data.get("list", []) if isinstance(list_data, dict) else []
-        for item in lst:
-            code = item.get("bzdm")
-            if code:
-                lookup[code] = item
-        if len(lst) < page_size:
-            break
-        page_index += 1
 
-    _fund_estimate_cache["_ts"] = now
-    _fund_estimate_cache["_data"] = lookup
-    return lookup
+    if published_nav is not None:
+        return {
+            "name": name,
+            "est_nav": published_nav,
+            "prev_nav": None,
+            "pct": None,
+            "change": None,
+            "ts": published_date,
+            "quote_status": "published_nav",
+            "quote_label": "已公布净值",
+        }
 
-
-def _fetch_all_fund_estimates_direct() -> dict[str, dict]:
-    now = time_module.time()
-    if _fund_estimate_cache.get("_ts") and now - _fund_estimate_cache["_ts"] < _FUND_ESTIMATE_CACHE_TTL:
-        return _fund_estimate_cache["_data"]
-
-    url = "https://api.fund.eastmoney.com/FundGuZhi/GetFundGZList"
-    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/"}
-    params = {"type": "1", "sort": "3", "orderType": "desc", "canbuy": "0", "pageIndex": "1", "pageSize": "50000"}
-    resp = requests.get(url, params=params, headers=hdrs, timeout=10)
-    data = resp.json()
-    list_data = data.get("Data")
-    lst = list_data.get("list", []) if isinstance(list_data, dict) else []
-    lookup = {}
-    for item in lst:
-        code = item.get("bzdm")
-        if code:
-            lookup[code] = item
-    _fund_estimate_cache["_ts"] = now
-    _fund_estimate_cache["_data"] = lookup
-    return lookup
-
-
-def _fetch_all_fund_estimates() -> dict[str, dict]:
-    if _USE_PAGINATION_MODE:
-        return _fetch_all_fund_estimates_paginated()
-    return _fetch_all_fund_estimates_direct()
-
-
-def _set_estimate_mode(mode: bool):
-    global _USE_PAGINATION_MODE
-    _USE_PAGINATION_MODE = mode
-    _save_estimate_mode_pref(mode)
-
-
-def _clear_estimate_cache():
-    _fund_estimate_cache.clear()
-
-
-def _parse_fund_estimate(item: dict, code: str) -> dict:
-    name = item.get("jjjc", "") or code
-    gsz_raw = item.get("gsz", "---")
-    gszzl_raw = item.get("gszzl", "---")
-    dwjz_raw = item.get("dwjz", "---")
-    gxrq = item.get("gxrq", "")
-
-    est_nav = float(gsz_raw) if gsz_raw not in ("---", "", None) else None
-    prev_nav = float(dwjz_raw) if dwjz_raw not in ("---", "", None) else None
-    pct_raw = gszzl_raw.replace("%", "") if gszzl_raw not in ("---", "", None) else None
-    pct = float(pct_raw) if pct_raw is not None else None
-    ts = gxrq or ""
-
-    if est_nav is None:
-        raise ValueError("基金估算净值缺失")
-    change = est_nav - prev_nav if prev_nav else 0.0
-    pct = pct if pct is not None else (change / prev_nav * 100 if prev_nav else 0.0)
-
-    return {"name": name, "est_nav": est_nav, "prev_nav": prev_nav, "pct": pct, "change": change, "ts": ts}
+    raise ValueError("基金估值与已公布净值均缺失")
 
 
 _fund_meta_name_cache: dict[str, str] = {}
@@ -493,57 +492,107 @@ def _nav_history_quote(code: str) -> dict:
         "pct": pct,
         "change": change,
         "ts": df["净值日期"].iloc[-1].strftime("%Y-%m-%d"),
+        "quote_status": "published_nav",
+        "quote_label": "已公布净值",
     }
     _fund_quote_fallback_cache[code] = (now, quote)
     return quote
 
 
-def fetch_fund(code: str):
-    lookup = _fetch_all_fund_estimates()
-    item = lookup.get(code)
-    if item is None:
-        parsed = _nav_history_quote(code)
-    else:
+def fetch_fund_estimates(codes: list[str]) -> dict[str, dict]:
+    """获取指定基金报价，并明确区分盘中估值与已公布净值。"""
+    normalized_codes = _normalize_fund_codes(codes)
+    if not normalized_codes:
+        return {}
+
+    try:
+        lookup = _fetch_fund_valuation_last(normalized_codes)
+    except ValueError as exc:
+        LOGGER.warning("批量基金估值获取失败，将使用已公布净值: %s", exc)
+        lookup = {}
+
+    results: dict[str, dict] = {}
+    for code in normalized_codes:
         try:
-            parsed = _parse_fund_estimate(item, code)
-        except ValueError:
-            parsed = _nav_history_quote(code)
+            item = lookup.get(code)
+            if item is None:
+                parsed = _nav_history_quote(code)
+            else:
+                try:
+                    parsed = _parse_fund_valuation_last(item, code)
+                except ValueError:
+                    parsed = _nav_history_quote(code)
+        except Exception as exc:
+            LOGGER.warning("基金报价获取失败: %s: %s", code, exc)
+            results[code] = {
+                "name": code,
+                "pct": None,
+                "ts": "",
+                "prev_nav": None,
+                "current_nav": None,
+                "change": None,
+                "quote_status": "unavailable",
+                "quote_label": "暂无报价",
+            }
+            continue
+
+        results[code] = {
+            "name": parsed["name"],
+            "pct": parsed["pct"],
+            "ts": parsed["ts"],
+            "prev_nav": parsed["prev_nav"],
+            "current_nav": parsed["est_nav"],
+            "change": parsed["change"],
+            "quote_status": parsed["quote_status"],
+            "quote_label": parsed["quote_label"],
+        }
+    return results
+
+
+def fetch_fund(code: str):
+    normalized_code = normalize_fund_code(code)
+    if not normalized_code:
+        raise ValueError("基金代码不能为空")
+
+    parsed = fetch_fund_estimates([normalized_code])[normalized_code]
+    if parsed["quote_status"] == "unavailable":
+        raise ValueError("基金报价不可用")
 
     stats = {}
     try:
-        stats = fund_history_stats(code)
+        stats = fund_history_stats(normalized_code)
     except Exception as exc:
-        LOGGER.exception("基金历史获取失败: %s", code)
+        LOGGER.exception("基金历史获取失败: %s", normalized_code)
+
+    current_nav = parsed["current_nav"]
+    previous_nav = parsed["prev_nav"]
+    change = parsed["change"]
+    pct = parsed["pct"]
+    if parsed["quote_status"] != "estimate":
+        historical_previous = stats.get("history_prev_nav")
+        if historical_previous not in (None, 0):
+            previous_nav = historical_previous
+            change = current_nav - previous_nav
+            pct = change / previous_nav * 100
 
     return {
         "name": parsed["name"],
-        "current": parsed["est_nav"],
-        "change": parsed["change"],
-        "pct": parsed["pct"],
-        "prev_close": parsed["prev_nav"] or 0.0,
+        "current": current_nav,
+        "change": change if change is not None else 0.0,
+        "pct": pct if pct is not None else 0.0,
+        "prev_close": previous_nav or 0.0,
         "ts": parsed["ts"],
+        "quote_status": parsed["quote_status"],
+        "quote_label": parsed["quote_label"],
         **stats,
     }
 
 
 def fetch_fund_estimate(code: str):
-    lookup = _fetch_all_fund_estimates()
-    item = lookup.get(code)
-    if item is None:
-        parsed = _nav_history_quote(code)
-    else:
-        try:
-            parsed = _parse_fund_estimate(item, code)
-        except ValueError:
-            parsed = _nav_history_quote(code)
-
-    return {
-        "name": parsed["name"],
-        "pct": parsed["pct"],
-        "ts": parsed["ts"],
-        "prev_nav": parsed["prev_nav"],
-        "current_nav": parsed["est_nav"],
-    }
+    normalized_code = normalize_fund_code(code)
+    if not normalized_code:
+        raise ValueError("基金代码不能为空")
+    return fetch_fund_estimates([normalized_code])[normalized_code]
 
 
 def fund_list_stats_from_history(code: str):
@@ -779,6 +828,8 @@ def fund_history_stats(code: str):
         "chg7": pct_change(7),
         "chg15": pct_change(15),
         "chg30": pct_change(30),
+        "latest_nav": latest,
+        "history_prev_nav": navs[-2] if len(navs) >= 2 else None,
         "nav_history": {window: build_recent_nav_change_rows(df, window) for window in DETAIL_NAV_HISTORY_WINDOWS},
         "ma5": ma5,
         "ma10": ma10,
@@ -1223,22 +1274,6 @@ class FletApp:
             ),
         )
 
-        initial_mode = _load_estimate_mode_pref()
-        _set_estimate_mode(initial_mode)
-        self.btn_estimate_mode = ft.Button(
-            "翻页" if initial_mode else "直接",
-            icon=ft.Icons.SWAP_HORIZ,
-            on_click=self._toggle_estimate_mode,
-            icon_color=ACCENT,
-            tooltip="当前：翻页模式（AkShare 风格，pageSize=20000 分页拉取）" if initial_mode else "当前：URL 直连模式（pageSize=50000 单次请求）",
-            style=ft.ButtonStyle(
-                padding=ft.Padding(10, 10, 10, 10),
-                shape=ft.RoundedRectangleBorder(radius=12),
-                bgcolor={ft.ControlState.DEFAULT: SURFACE},
-                overlay_color={ft.ControlState.HOVERED: "#162196F3"},
-            ),
-        )
-
         self.detail_holding_tiles = [
             self._create_metric_tile("持仓份额"),
             self._create_metric_tile("持仓成本"),
@@ -1382,7 +1417,7 @@ class FletApp:
                                 border_radius=999,
                             ),
                             ft.Container(
-                                content=ft.Text("净值 / 估值实时更新", color=SUBTEXT, size=12),
+                                content=ft.Text("报价类型见更新时间", color=SUBTEXT, size=12),
                                 padding=ft.Padding(10, 6, 10, 6),
                                 bgcolor="#0D111827",
                                 border_radius=999,
@@ -1429,7 +1464,7 @@ class FletApp:
         top_row = ft.Row(
             [
                 ft.Container(content=self.dd_target, expand=True),
-                ft.Row([self.btn_estimate_mode, self.btn_refresh, self.btn_detail_holding_action], spacing=4),
+                ft.Row([self.btn_refresh, self.btn_detail_holding_action], spacing=4),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1969,19 +2004,6 @@ class FletApp:
         except Exception:
             LOGGER.exception("保存字体偏好失败")
 
-    def _toggle_estimate_mode(self, e):
-        new_mode = not _USE_PAGINATION_MODE
-        _set_estimate_mode(new_mode)
-        _fund_estimate_cache.clear()
-        self.btn_estimate_mode.content = "翻页" if new_mode else "直接"
-        self.btn_estimate_mode.tooltip = (
-            "当前：翻页模式（AkShare 风格，pageSize=20000 分页拉取）"
-            if new_mode else "当前：URL 直连模式（pageSize=50000 单次请求）"
-        )
-        self.page.update()
-        self._show_message(f"已切换至{'翻页' if new_mode else '直接'}模式")
-        self.manual_refresh()
-
     def open_fund_detail(self, code: str):
         # Switch to detail tab and select corresponding fund
         self._set_tab_selected("fund")
@@ -2293,6 +2315,8 @@ class FletApp:
 
     def _open_add_fund_preview_dialog(self, preview: dict):
         pct = preview.get("pct")
+        quote_label = str(preview.get("quote_label") or "暂无报价")
+        nav_text = self._format_number_value(preview.get("current_nav"), digits=4)
         pct_text = "--"
         if pct is not None:
             try:
@@ -2308,7 +2332,8 @@ class FletApp:
             content=ft.Column(
                 [
                     ft.Text(f"{preview.get('name', '')} ({preview.get('code', '')})", weight=ft.FontWeight.W_600),
-                    ft.Text(f"实时估值涨跌幅：{pct_text}", color=SUBTEXT),
+                    ft.Text(f"{quote_label}：{nav_text}", color=SUBTEXT),
+                    ft.Text(f"涨跌幅：{pct_text}", color=SUBTEXT),
                 ],
                 tight=True,
                 spacing=8,
@@ -2801,6 +2826,8 @@ class FletApp:
         def worker():
             fetch_time = datetime.now().strftime("%H:%M:%S")
             funds = self.funds or DEFAULT_FUND_CONFIG["funds"]
+            fund_codes = [str(f.get("code") or "").strip() for f in funds if isinstance(f, dict)]
+            estimates = fetch_fund_estimates(fund_codes)
 
             items: list[dict] = []
             for f in funds:
@@ -2823,6 +2850,8 @@ class FletApp:
                     "daily_profit_pct": None,
                     "total_profit": None,
                     "total_profit_pct": None,
+                    "quote_status": "unavailable",
+                    "quote_label": "暂无报价",
                     "error": None,
                 }
 
@@ -2832,13 +2861,17 @@ class FletApp:
                     row["holding_cost_amount"] = holding.get("cost_amount")
 
                 try:
-                    est = fetch_fund_estimate(code)
+                    est = estimates.get(code) or {}
                     row["name"] = cfg_name or (est.get("name") or "").strip() or cached_name or code
                     row["est_pct"] = est.get("pct")
                     row["current_nav"] = est.get("current_nav")
                     row["previous_nav"] = est.get("prev_nav")
+                    row["quote_status"] = est.get("quote_status") or "unavailable"
+                    row["quote_label"] = est.get("quote_label") or "暂无报价"
+                    if row["quote_status"] == "unavailable":
+                        row["error"] = "基金报价不可用"
                 except Exception as exc:
-                    LOGGER.exception("Fund estimate failed: %s", code)
+                    LOGGER.exception("Fund estimate result failed: %s", code)
                     row["error"] = str(exc)
 
                 try:
@@ -2901,6 +2934,9 @@ class FletApp:
 
             name_color = TEXT if not it.get("error") else SUBTEXT
             metrics = self._build_fund_overview_metrics(it, prev_nav_label)
+            quote_status = it.get("quote_status")
+            quote_tag = "估" if quote_status == "estimate" else "净" if quote_status == "published_nav" else "待"
+            quote_tag_color = ACCENT if quote_status == "estimate" else VALUE_TEXT if quote_status == "published_nav" else SUBTEXT
 
             # Extract metrics
             market_metric = metrics[0] if metrics else {"primary": "--", "secondary": "--", "color": SUBTEXT}
@@ -2912,7 +2948,7 @@ class FletApp:
                     ft.Row(
                         [
                             ft.Container(
-                                content=ft.Text("估" if it.get("est_pct") is not None else "待", size=9, color=ACCENT),
+                                content=ft.Text(quote_tag, size=9, color=quote_tag_color),
                                 padding=ft.Padding(3, 1, 3, 1),
                                 bgcolor="#102196F3",
                                 border_radius=3,
@@ -3217,6 +3253,7 @@ class FletApp:
         }
 
     def _build_fund_detail_holding_metrics(self, item: dict) -> list[dict]:
+        quote_label = str(item.get("quote_label") or "净值")
         return [
             {
                 "label": "持仓份额",
@@ -3233,7 +3270,7 @@ class FletApp:
             {
                 "label": "当日盈亏",
                 "value": FletApp._format_money_value(self, item.get("daily_profit"), signed=True),
-                "subtitle": "按估值与昨收净值计算",
+                "subtitle": f"按{quote_label}与前一净值计算",
                 "color": FletApp._metric_color(self, item.get("daily_profit")),
             },
             {
@@ -3658,7 +3695,9 @@ class FletApp:
         change_text = f"{sign}{res['change']:.4f}  ({sign}{res['pct']:.2f}%)"
 
         # Header time prefers source timestamp
-        header_time = res.get("ts") or fetch_time
+        quote_label = str(res.get("quote_label") or "报价")
+        source_time = res.get("ts") or fetch_time
+        header_time = f"{quote_label} · {source_time}"
 
         chg3_raw = res.get("chg3")
         chg7_raw = res.get("chg7")
@@ -3670,7 +3709,13 @@ class FletApp:
         dist20_raw = res.get("dist_ma20")
         dist250_raw = res.get("dist_ma250")
 
-        holding_item = {"holding_units": None, "holding_cost_amount": None, "daily_profit": None, "total_profit": None}
+        holding_item = {
+            "holding_units": None,
+            "holding_cost_amount": None,
+            "daily_profit": None,
+            "total_profit": None,
+            "quote_label": quote_label,
+        }
         if tgt.get("type") == "fund":
             fund_cfg = self._get_fund_config_item(tgt.get("code"))
             holding = fund_cfg.get("holding") if isinstance(fund_cfg, dict) else None
@@ -3709,7 +3754,7 @@ class FletApp:
         st.update(
             {
                 "txt_title": tgt.get("label", ""),
-                "txt_header_time": f"更新于 {fetch_time}",
+                "txt_header_time": header_time,
                 "txt_price": price_text,
                 "txt_change": change_text,
                 "txt_change_color": change_color,

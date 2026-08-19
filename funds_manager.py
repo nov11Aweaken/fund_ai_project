@@ -96,6 +96,9 @@ def preview_fund_candidate(code: str, fetch_estimate: Callable[[str], dict]) -> 
         "name": name,
         "pct": result.get("pct"),
         "ts": result.get("ts") or "",
+        "current_nav": result.get("current_nav"),
+        "quote_status": result.get("quote_status") or "unavailable",
+        "quote_label": result.get("quote_label") or "暂无报价",
     }
 
 
