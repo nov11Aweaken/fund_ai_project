@@ -4,40 +4,84 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "EXIT_CODE=0"
-set "PY_CMD=python"
+set "PY_EXE="
+set "PY_ARGS="
 set "EXE_PREFIX=基你太美"
-if exist ".\.venv\Scripts\python.exe" set "PY_CMD=.\.venv\Scripts\python.exe"
+set "BUILD_TOOLS_DIR=%CD%\.build_tools"
+set "BUILD_VENV=%CD%\.build_tools\venv"
+set "BUILD_PYTHON=%CD%\.build_tools\venv\Scripts\python.exe"
+
+REM Prefer a healthy project virtual environment, then a system Python.
+if exist ".\.venv\Scripts\python.exe" (
+  ".\.venv\Scripts\python.exe" --version >nul 2>nul
+  if not errorlevel 1 (
+    set "PY_EXE=%CD%\.venv\Scripts\python.exe"
+  ) else (
+    echo [WARN] .venv is unavailable and will be skipped.
+  )
+)
+
+if not defined PY_EXE (
+  where py >nul 2>nul
+  if not errorlevel 1 (
+    py -3 --version >nul 2>nul
+    if not errorlevel 1 (
+      set "PY_EXE=py"
+      set "PY_ARGS=-3"
+    )
+  )
+)
+
+if not defined PY_EXE (
+  where python >nul 2>nul
+  if not errorlevel 1 (
+    python --version >nul 2>nul
+    if not errorlevel 1 set "PY_EXE=python"
+  )
+)
+
+REM If Windows has no working Python, let uv create an isolated build environment.
+if not defined PY_EXE (
+  where uv >nul 2>nul
+  if errorlevel 1 (
+    echo [ERROR] No working Python was found, and uv is not installed.
+    echo [INFO] Install Python 3.12 or uv, then run this script again.
+    set "EXIT_CODE=1"
+    goto :end
+  )
+
+  set "UV_CACHE_DIR=!BUILD_TOOLS_DIR!\uv-cache"
+  set "UV_PYTHON_INSTALL_DIR=!BUILD_TOOLS_DIR!\python"
+  set "UV_LINK_MODE=copy"
+
+  if exist "!BUILD_PYTHON!" (
+    "!BUILD_PYTHON!" --version >nul 2>nul
+    if not errorlevel 1 (
+      "!BUILD_PYTHON!" -m pip --version >nul 2>nul
+      if not errorlevel 1 set "PY_EXE=!BUILD_PYTHON!"
+    )
+  )
+
+  if not defined PY_EXE (
+    echo [INFO] No working Python found. Creating an isolated Python 3.12 build environment with uv...
+    uv venv --python 3.12 --seed --clear "!BUILD_VENV!"
+    if errorlevel 1 (
+      echo [ERROR] Failed to create the isolated build environment.
+      set "EXIT_CODE=1"
+      goto :end
+    )
+    set "PY_EXE=!BUILD_PYTHON!"
+  )
+)
 
 echo ==========================================
 echo           One-Click EXE Builder
 echo ==========================================
-echo [INFO] Python: %PY_CMD%
-
-REM Clean up running main.exe processes to avoid file lock issues
-echo [INFO] Checking for running processes...
-tasklist | find /i "main.exe" >nul 2>nul
-if not errorlevel 1 (
-  echo [INFO] Found running main.exe, terminating...
-  taskkill /IM main.exe /F >nul 2>nul
-  timeout /t 1 /nobreak >nul
-)
+echo [INFO] Python: !PY_EXE! !PY_ARGS!
 
 REM Get current date in YYYYMMDD format
-REM Supports both English and localized date formats
-for /f "tokens=1-4 delims=/- " %%a in ('wmic os get LocalDateTime ^| find "20"') do (
-  set "DATE_STR=%%a"
-)
-if not "!DATE_STR!"=="" set "DATE_STR=!DATE_STR:~0,8!"
-
-if "!DATE_STR!"=="" (
-  REM Fallback to alternative method
-  for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (
-    set "mm=%%a"
-    set "dd=%%b"
-    set "yyyy=%%c"
-  )
-  set "DATE_STR=!yyyy!!mm!!dd!"
-)
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "DATE_STR=%%i"
+if not defined DATE_STR set "DATE_STR=unknown_date"
 
 echo.
 echo ==========================================
@@ -65,19 +109,21 @@ if "!SAFE_USER_INPUT!"=="" (
 
 set "EXE_NAME=!EXE_PREFIX!_!DATE_STR!_!SAFE_USER_INPUT!"
 
-where python >nul 2>nul
+"%PY_EXE%" %PY_ARGS% -m pip --version >nul 2>nul
 if errorlevel 1 (
-  if not exist "%PY_CMD%" (
-    echo [ERROR] Python was not found.
+  echo [INFO] Initializing pip...
+  "%PY_EXE%" %PY_ARGS% -m ensurepip --upgrade
+  if errorlevel 1 (
+    echo [ERROR] Failed to initialize pip.
     set "EXIT_CODE=1"
     goto :end
   )
 )
 
-%PY_CMD% -c "import flet" >nul 2>nul
+"%PY_EXE%" %PY_ARGS% -c "import akshare, certifi, flet, matplotlib, mplfinance, pandas, pyecharts, requests" >nul 2>nul
 if errorlevel 1 (
   echo [INFO] Installing project dependencies...
-  %PY_CMD% -m pip install -r .\requirements.txt
+  "%PY_EXE%" %PY_ARGS% -m pip install -r .\requirements.txt
   if errorlevel 1 (
     echo [ERROR] Failed to install requirements.
     set "EXIT_CODE=1"
@@ -85,10 +131,10 @@ if errorlevel 1 (
   )
 )
 
-%PY_CMD% -m PyInstaller --version >nul 2>nul
+"%PY_EXE%" %PY_ARGS% -m PyInstaller --version >nul 2>nul
 if errorlevel 1 (
   echo [INFO] Installing PyInstaller...
-  %PY_CMD% -m pip install pyinstaller
+  "%PY_EXE%" %PY_ARGS% -m pip install pyinstaller
   if errorlevel 1 (
     echo [ERROR] Failed to install PyInstaller.
     set "EXIT_CODE=1"
@@ -96,8 +142,16 @@ if errorlevel 1 (
   )
 )
 
+REM Clean up running executables only after the build environment is ready.
+echo [INFO] Checking for running processes...
+tasklist | find /i "main.exe" >nul 2>nul
+if not errorlevel 1 (
+  echo [INFO] Found running main.exe, terminating...
+  taskkill /IM main.exe /F >nul 2>nul
+  timeout /t 1 /nobreak >nul
+)
 echo [INFO] Building with PyInstaller...
-%PY_CMD% -m PyInstaller --clean .\main.spec
+"%PY_EXE%" %PY_ARGS% -m PyInstaller --clean .\main.spec
 if errorlevel 1 (
   echo [ERROR] Build failed. Check logs above.
   set "EXIT_CODE=1"

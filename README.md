@@ -68,14 +68,15 @@ Flet 桌面程序，提供中国市场指数、基金列表与基金详情，支
 ### 一键打包（bat）
 - 运行项目根目录的 `build_exe.bat`。
 - 按提示输入 exe 名称（不含 `.exe`）。
-- 打包完成后会在 `dist` 目录生成对应名称的文件，例如输入 `基你太美0303`，输出 `dist\基你太美0303.exe`。
+- 打包完成后会在 `dist` 目录生成对应名称的主程序。
 
 ## 说明
 - 市场页指数：仅使用东方财富 Eastmoney 指数行情，按 `MARKET_INDEX_CONFIGS` 中的 `code`、`name`、`category` 配置并匹配数据。
 - 基金报价：优先调用天天基金新版批量估值接口 `FundValuationLast`；返回 `GSZ`、`GSZZL`、`GZTIME` 时显示“盘中估值”，否则使用 `NAV`、`PDATE` 或基金历史数据作为“已公布净值”。
 - 基金净值历史：使用天天基金 `pingzhongdata/{code}.js`，用于收益区间、均线和图表。
 - 市场数据默认 5 分钟自动刷新，可在 `REFRESH_MS` 中调整（毫秒）。
-- 动态图表使用随程序打包的 ECharts 资源；如图表加载失败，请检查网络和 `%LOCALAPPDATA%/market_watch/app.log`。
+- 基金详情页的静态净值图固定显示 NAV、MA5、MA10、MA20、MA250。
+- 动态图表使用随程序打包的 ECharts 资源；点击“浏览器打开”时优先使用 Edge/Chrome 在屏幕中央打开独立应用窗口，并在不可用时回退默认浏览器。
 
 ## EXE 常见排障
 - 指数提示“EM无可用数据”时，请先看日志：`%LOCALAPPDATA%/market_watch/app.log`。

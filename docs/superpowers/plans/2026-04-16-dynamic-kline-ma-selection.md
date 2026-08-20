@@ -15,7 +15,7 @@
 - **Modify:** `main.py`
   - 新增结构化动态图数据准备函数
   - 调整动态图 HTML 生成函数，向页面注入候选 MA、默认选中值和前端重绘逻辑
-  - 保持 `open_dynamic_kline()` 调用方式不变
+  - 保持 `open_dynamic_kline_in_browser()` 调用方式不变
 - **Modify:** `tests/test_main_page_redesign.py`
   - 为动态图新增数据结构、默认选中、页面内重绘配置等回归测试
 - **Reference only:** `docs/superpowers/specs/2026-04-16-dynamic-kline-ma-selection-design.md`

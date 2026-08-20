@@ -1,6 +1,7 @@
 import json
 import threading
 import webbrowser
+import ctypes
 import os
 import sys
 import logging
@@ -8,8 +9,10 @@ import tempfile
 import io
 import re
 import shutil
+import subprocess
 import time as time_module
 from contextlib import contextmanager
+from ctypes import wintypes
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -74,6 +77,8 @@ MARKET_MIN_REFRESH_SECONDS = 120
 
 REFRESH_MS = 300000  # 5分钟自动刷新
 DYNAMIC_CHART_ASSET_NAME = "echarts.min.js"
+DYNAMIC_CHART_BROWSER_WIDTH = 1100
+DYNAMIC_CHART_BROWSER_HEIGHT = 760
 DETAIL_NAV_HISTORY_WINDOWS = [7, 15]
 DETAIL_NAV_HISTORY_EMPTY_HINT = "暂无最近净值记录"
 
@@ -1181,6 +1186,90 @@ def write_dynamic_chart_html(tgt: dict) -> Path:
     return out
 
 
+def _find_chromium_browser_executable() -> Path | None:
+    edge_candidates: list[Path] = []
+    chrome_candidates: list[Path] = []
+    edge_on_path = shutil.which("msedge.exe")
+    chrome_on_path = shutil.which("chrome.exe")
+    if edge_on_path:
+        edge_candidates.append(Path(edge_on_path))
+    if chrome_on_path:
+        chrome_candidates.append(Path(chrome_on_path))
+
+    program_files = os.getenv("PROGRAMFILES")
+    program_files_x86 = os.getenv("PROGRAMFILES(X86)")
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if program_files_x86:
+        edge_candidates.append(Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+    if program_files:
+        edge_candidates.append(Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+        chrome_candidates.append(Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    if program_files_x86:
+        chrome_candidates.append(Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    if local_app_data:
+        edge_candidates.append(Path(local_app_data) / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+        chrome_candidates.append(Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe")
+
+    seen: set[str] = set()
+    for candidate in [*edge_candidates, *chrome_candidates]:
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _windows_work_area() -> tuple[int, int, int, int]:
+    try:
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return rect.left, rect.top, rect.right, rect.bottom
+        width = ctypes.windll.user32.GetSystemMetrics(0)
+        height = ctypes.windll.user32.GetSystemMetrics(1)
+        if width > 0 and height > 0:
+            return 0, 0, width, height
+    except (AttributeError, OSError):
+        pass
+    return 0, 0, 1920, 1080
+
+
+def _centered_browser_window_bounds() -> tuple[int, int, int, int]:
+    left, top, right, bottom = _windows_work_area()
+    work_width = max(1, right - left)
+    work_height = max(1, bottom - top)
+    width = min(DYNAMIC_CHART_BROWSER_WIDTH, work_width)
+    height = min(DYNAMIC_CHART_BROWSER_HEIGHT, work_height)
+    x = left + max(0, (work_width - width) // 2)
+    y = top + max(0, (work_height - height) // 2)
+    return x, y, width, height
+
+
+def open_dynamic_chart_browser_window(html_path: Path) -> bool:
+    resolved_path = html_path.resolve()
+    if not resolved_path.is_file():
+        raise ValueError(f"动态图文件不存在: {resolved_path}")
+
+    uri = resolved_path.as_uri()
+    browser_path = _find_chromium_browser_executable()
+    if browser_path is not None:
+        x, y, width, height = _centered_browser_window_bounds()
+        command = [
+            str(browser_path),
+            f"--app={uri}",
+            f"--window-size={width},{height}",
+            f"--window-position={x},{y}",
+        ]
+        try:
+            subprocess.Popen(command, cwd=str(_app_dir()))
+            return True
+        except OSError as exc:
+            LOGGER.warning("Chromium 浏览器窗口启动失败，回退默认浏览器: %s", exc)
+
+    return bool(webbrowser.open(uri, new=1))
+
+
 
 def get_chart_html(code: str, name: str = "", script_src: str = "echarts.min.js"):
     chart_data = build_dynamic_chart_data(code, name)
@@ -1211,7 +1300,6 @@ class FletApp:
         self._fund_list_sort_desc = False
         self._fund_list_copy_entries: list[dict] = []
         self._clipboard_service = ft.Clipboard()
-
         # === Market indices view state ===1
         self._market_cache: dict[str, dict] = {}
         self._market_refreshing = False
@@ -1233,15 +1321,9 @@ class FletApp:
             icon_color=ACCENT,
             tooltip="刷新",
         )
-        self.btn_dynamic_kline = ft.Button(
-            "动态K线图",
-            on_click=self.open_dynamic_kline,
-            style=ft.ButtonStyle(
-                bgcolor={ft.ControlState.DEFAULT: SURFACE},
-                color={ft.ControlState.DEFAULT: ACCENT},
-                overlay_color={ft.ControlState.HOVERED: "#1AFFFFFF"},
-                shape={ft.ControlState.DEFAULT: ft.RoundedRectangleBorder(radius=10)},
-            ),
+        self.btn_dynamic_kline_browser = ft.TextButton(
+            "浏览器打开",
+            on_click=self.open_dynamic_kline_in_browser,
         )
 
         # === Data card UI ===
@@ -1440,14 +1522,22 @@ class FletApp:
                     ],
                     spacing=4,
                 ),
-                self.btn_dynamic_kline,
+                ft.Row(
+                    [self.btn_dynamic_kline_browser],
+                    spacing=6,
+                    wrap=True,
+                ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         self.chart_card = ft.Container(
-            content=ft.Column([chart_header, self.chart_view], spacing=10, expand=True),
+            content=ft.Column(
+                [chart_header, self.chart_view],
+                spacing=10,
+                expand=True,
+            ),
             expand=True,
             padding=10,
             bgcolor=SURFACE,
@@ -1886,7 +1976,6 @@ class FletApp:
 
         # Toggle fund-only controls
         self.dd_target.visible = is_fund
-        self.btn_dynamic_kline.visible = is_fund
 
         # Update button styles
         self.btn_tab_fund.style = ft.ButtonStyle(
@@ -3590,7 +3679,7 @@ class FletApp:
         self.page.update()
         self.manual_refresh()
 
-    def open_dynamic_kline(self, e):
+    def open_dynamic_kline_in_browser(self, e):
         tgt = self.current_target_data()
         if not tgt:
             self._show_message("暂无基金")
@@ -3602,10 +3691,10 @@ class FletApp:
             self._show_message(f"动态图生成失败：{exc}")
             return
         try:
-            opened = webbrowser.open(path.resolve().as_uri())
+            opened = open_dynamic_chart_browser_window(path)
         except Exception as exc:
-            LOGGER.exception("动态K线图打开失败: %s", tgt.get("code"))
-            self._show_message(f"动态图打开失败：{exc}")
+            LOGGER.exception("浏览器打开动态图失败: %s", tgt.get("code"))
+            self._show_message(f"浏览器打开动态图失败：{exc}")
             return
         if not opened:
             self._show_message("动态图打开失败：系统未找到可用的浏览器或关联程序")
@@ -3875,6 +3964,7 @@ def main(page: ft.Page):
         FONT_SANS = saved_font
 
     app = FletApp(page)
+
 
 if __name__ == "__main__":
     ft.run(main, view=ft.AppView.FLET_APP)

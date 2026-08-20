@@ -298,7 +298,7 @@ class PageRedesignHelperTests(unittest.TestCase):
         self.assertIn("const chartData =", html)
         self.assertIn('<script src="echarts.min.js"></script>', html)
 
-    def test_open_dynamic_kline_shows_message_when_browser_open_returns_false(self):
+    def test_open_dynamic_kline_in_browser_shows_message_when_browser_open_returns_false(self):
         messages: list[str] = []
         dummy_app = types.SimpleNamespace(
             current_target_data=lambda: {"code": "110022", "label": "测试基金 (110022)", "type": "fund"},
@@ -310,11 +310,74 @@ class PageRedesignHelperTests(unittest.TestCase):
             html_path.write_text("<html></html>", encoding="utf-8")
             with (
                 mock.patch.object(main, "write_dynamic_chart_html", return_value=html_path),
-                mock.patch.object(main.webbrowser, "open", return_value=False),
+                mock.patch.object(main, "open_dynamic_chart_browser_window", return_value=False),
             ):
-                FletApp.open_dynamic_kline(dummy_app, None)
+                FletApp.open_dynamic_kline_in_browser(dummy_app, None)
 
         self.assertEqual(messages, ["动态图打开失败：系统未找到可用的浏览器或关联程序"])
+
+    def test_centered_browser_window_bounds_uses_windows_work_area(self):
+        with mock.patch.object(main, "_windows_work_area", return_value=(0, 0, 1920, 1040)):
+            bounds = main._centered_browser_window_bounds()
+
+        self.assertEqual(bounds, (410, 140, 1100, 760))
+
+    def test_open_dynamic_chart_browser_window_uses_chromium_app_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "chart.html"
+            html_path.write_text("<html></html>", encoding="utf-8")
+            browser_path = Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe")
+            with (
+                mock.patch.object(main, "_find_chromium_browser_executable", return_value=browser_path),
+                mock.patch.object(main, "_centered_browser_window_bounds", return_value=(410, 140, 1100, 760)),
+                mock.patch.object(main, "_app_dir", return_value=Path("E:/app")),
+                mock.patch.object(main.subprocess, "Popen") as mock_popen,
+            ):
+                opened = main.open_dynamic_chart_browser_window(html_path)
+
+        self.assertTrue(opened)
+        command = mock_popen.call_args.args[0]
+        self.assertEqual(command[0], str(browser_path))
+        self.assertEqual(command[1], f"--app={html_path.resolve().as_uri()}")
+        self.assertIn("--window-size=1100,760", command)
+        self.assertIn("--window-position=410,140", command)
+        self.assertEqual(mock_popen.call_args.kwargs["cwd"], "E:\\app")
+
+    def test_open_dynamic_chart_browser_window_falls_back_to_default_browser(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "chart.html"
+            html_path.write_text("<html></html>", encoding="utf-8")
+            with (
+                mock.patch.object(main, "_find_chromium_browser_executable", return_value=None),
+                mock.patch.object(main.webbrowser, "open", return_value=True) as mock_open,
+            ):
+                opened = main.open_dynamic_chart_browser_window(html_path)
+
+        self.assertTrue(opened)
+        mock_open.assert_called_once_with(html_path.resolve().as_uri(), new=1)
+
+    def test_render_fund_nav_png_bytes_draws_fixed_ma_lines(self):
+        dates = pd.date_range("2024-01-01", periods=300, freq="D")
+        history_data = pd.DataFrame(
+            {
+                "净值日期": dates,
+                "单位净值": [1.0 + index / 1000 for index in range(300)],
+            }
+        )
+        fake_ax = mock.MagicMock()
+        fake_figure = mock.MagicMock()
+        fake_figure.add_subplot.return_value = fake_ax
+
+        with (
+            mock.patch.object(main, "fetch_fund_history_data", return_value=history_data),
+            mock.patch.object(main.plt, "figure", return_value=fake_figure),
+            mock.patch.object(main.plt, "close"),
+        ):
+            png = main.render_fund_nav_png_bytes("110022")
+
+        labels = [call.kwargs.get("label") for call in fake_ax.plot.call_args_list]
+        self.assertEqual(labels, ["NAV", "MA5", "MA10", "MA20", "MA250"])
+        self.assertEqual(png, fake_figure.savefig.call_args.args[0].getvalue())
 
     def test_build_market_overview_card_data_exposes_three_key_metrics(self):
         dummy_app = types.SimpleNamespace()
